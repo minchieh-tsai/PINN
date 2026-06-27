@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epi-levelset-pinn"
+version = "0.1.0"
+description = "Proof-of-concept level-set PINN workflow for EPI deposition and etch transitions."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "openpyxl",
+  "pyyaml",
+  "pydantic",
+  "torch",
+  "scikit-image",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+epi_pinn = ["py.typed"]

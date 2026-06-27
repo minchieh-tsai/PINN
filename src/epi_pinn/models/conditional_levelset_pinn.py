@@ -1,0 +1,115 @@
+"""Conditional level-set PINN with hard initial condition."""
+
+from __future__ import annotations
+
+from typing import Any, Mapping, Tuple
+
+import torch
+from torch import nn
+
+from epi_pinn.sampling import FEATURE_NAMES
+from epi_pinn.models.contour_encoder import ContourEncoder
+
+
+def _mlp(input_dim: int, hidden_dim: int, depth: int, output_dim: int) -> nn.Sequential:
+    layers = []
+    current = input_dim
+    for _ in range(max(1, depth)):
+        layers.append(nn.Linear(current, hidden_dim))
+        layers.append(nn.Tanh())
+        current = hidden_dim
+    layers.append(nn.Linear(current, output_dim))
+    return nn.Sequential(*layers)
+
+
+class LevelSetPINN(nn.Module):
+    def __init__(self, process_sign: float, model_config: Mapping[str, Any]) -> None:
+        super().__init__()
+        self.process_sign = float(process_sign)
+        self.correction_scale = float(model_config.get("correction_scale", 0.5))
+        self.velocity_residual_fraction = float(model_config.get("velocity_residual_fraction", 0.5))
+        self.hard_initial_condition = bool(model_config.get("hard_initial_condition", True))
+        embedding_dim = int(model_config.get("contour_embedding_dim", 64))
+        solution_hidden = int(model_config.get("solution_hidden_dim", 128))
+        solution_depth = int(model_config.get("solution_depth", 6))
+        velocity_hidden = int(model_config.get("velocity_hidden_dim", 64))
+        velocity_depth = int(model_config.get("velocity_depth", 4))
+
+        base_dim = len(FEATURE_NAMES)
+        self.contour_encoder = ContourEncoder(embedding_dim=embedding_dim)
+        self.solution_net = _mlp(base_dim + embedding_dim, solution_hidden, solution_depth, 1)
+        self.velocity_net = _mlp(base_dim + embedding_dim, velocity_hidden, velocity_depth, 1)
+
+    def _compose_features(self, features: torch.Tensor, contour_features: torch.Tensor) -> torch.Tensor:
+        if contour_features.ndim == 2:
+            contour_features = contour_features.unsqueeze(0)
+        embedding = self.contour_encoder(contour_features)
+        if embedding.shape[0] == 1:
+            embedding = embedding.expand(features.shape[0], -1)
+        elif embedding.shape[0] != features.shape[0]:
+            raise ValueError("Contour embedding batch size must be 1 or match feature batch size")
+        return torch.cat([features, embedding], dim=1)
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        contour_features: torch.Tensor,
+        raw_phi0: torch.Tensor,
+        duration_s: torch.Tensor,
+        average_rate: torch.Tensor,
+        clip_distance: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        composed = self._compose_features(features, contour_features)
+        tau = features[:, 2]
+        g_theta = self.solution_net(composed).squeeze(-1)
+        v_psi = self.velocity_net(composed).squeeze(-1)
+
+        nominal = raw_phi0 - tau * duration_s * self.process_sign * average_rate
+        correction = tau * float(clip_distance) * self.correction_scale * torch.tanh(g_theta)
+        if self.hard_initial_condition:
+            phi = nominal + correction
+        else:
+            phi = raw_phi0 + correction
+
+        velocity = (
+            self.process_sign
+            * average_rate
+            * (1.0 + self.velocity_residual_fraction * torch.tanh(v_psi))
+        )
+        return phi, velocity
+
+    @torch.no_grad()
+    def predict_numpy(
+        self,
+        features_np,
+        contour_features_np,
+        raw_phi0_np,
+        duration_s: float,
+        average_rate: float,
+        clip_distance: float,
+        device: str,
+        dtype: torch.dtype,
+        batch_size: int = 16384,
+    ):
+        self.eval()
+        outputs = []
+        contour = torch.as_tensor(contour_features_np, dtype=dtype, device=device)
+        duration = torch.tensor(float(duration_s), dtype=dtype, device=device)
+        rate = torch.tensor(float(average_rate), dtype=dtype, device=device)
+        for start in range(0, features_np.shape[0], batch_size):
+            end = start + batch_size
+            features = torch.as_tensor(features_np[start:end], dtype=dtype, device=device)
+            raw_phi0 = torch.as_tensor(raw_phi0_np[start:end], dtype=dtype, device=device)
+            phi, _velocity = self.forward(features, contour, raw_phi0, duration, rate, clip_distance)
+            outputs.append(phi.detach().cpu())
+        return torch.cat(outputs, dim=0).numpy()
+
+
+class DepositionPINN(LevelSetPINN):
+    def __init__(self, model_config: Mapping[str, Any]) -> None:
+        super().__init__(process_sign=1.0, model_config=model_config)
+
+
+class EtchPINN(LevelSetPINN):
+    def __init__(self, model_config: Mapping[str, Any]) -> None:
+        super().__init__(process_sign=-1.0, model_config=model_config)
