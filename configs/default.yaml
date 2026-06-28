@@ -29,9 +29,9 @@ level_set:
   input_kind: signed_distance
   sign_convention: negative_inside
   value_unit: pixel
-  rebuild_sdf: false
+  rebuild_sdf: true
   phi_clip_distance: 32.0
-  narrow_band_distance: 8.0
+  narrow_band_distance: 4.0
 
 contour:
   num_points: 20
@@ -88,15 +88,15 @@ model:
   contour_embedding_dim: 64
   use_nominal_rate_solution: true
   hard_initial_condition: true
-  correction_scale: 0.5
-  velocity_residual_fraction: 0.5
+  correction_scale: 0.20
+  velocity_residual_fraction: 0.20
   use_curvature_feature: true
 
 loss:
   sdf: 1.0
-  dice: 0.5
-  pde: 1.0
-  eikonal: 0.02
+  dice: 1.0
+  pde: 0.2
+  eikonal: 0.10
   average_rate: 0.5
   velocity_jacobian: 1.0e-4
   sign: 0.05
@@ -104,19 +104,19 @@ loss:
   contour_initial_condition: 0.1
 
 sampling:
-  endpoint_interface_fraction: 0.70
-  collocation_interface_fraction: 0.60
+  endpoint_interface_fraction: 0.85
+  collocation_interface_fraction: 0.75
   collocation_contour_fraction: 0.20
-  collocation_global_fraction: 0.20
+  collocation_global_fraction: 0.05
 
 training:
   seed: 42
   device: auto
   dtype: float64
-  adam_steps: 10000
-  adam_lr: 1.0e-3
-  endpoint_batch_size: 4096
-  collocation_batch_size: 4096
+  adam_steps: 20000
+  adam_lr: 3.0e-4
+  endpoint_batch_size: 8192
+  collocation_batch_size: 8192
   grad_clip_norm: 10.0
   checkpoint_every: 500
   log_every: 100
