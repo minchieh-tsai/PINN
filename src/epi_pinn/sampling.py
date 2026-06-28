@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Tuple
+from typing import Dict, Mapping, Tuple
 
 import numpy as np
 
@@ -12,6 +12,7 @@ from epi_pinn.geometry import (
     curvature,
     normalized_grid,
     normalized_to_pixel_xy,
+    pixel_to_normalized_xy,
     spatial_gradients,
 )
 
@@ -141,6 +142,70 @@ def sample_endpoint_indices(
     if n_global > 0:
         chosen.append(rng.integers(0, n_total, size=n_global))
     return np.concatenate(chosen).astype(np.int64)
+
+
+def build_collocation_pools(
+    phi_initial: np.ndarray,
+    contour: ContourCondition,
+    narrow_band_distance: float,
+) -> Dict[str, np.ndarray]:
+    phi0 = np.asarray(phi_initial, dtype=np.float64)
+    height, width = phi0.shape
+    n_total = height * width
+    global_pool = np.arange(n_total, dtype=np.int64)
+    interface_pool = np.flatnonzero(np.abs(phi0.reshape(-1)) <= narrow_band_distance).astype(np.int64)
+    if interface_pool.size == 0:
+        interface_pool = global_pool
+
+    valid = contour.valid_mask > 0.0
+    contour_indices = []
+    if valid.any():
+        x_pixels, y_pixels = normalized_to_pixel_xy(contour.points_xy[valid, 0], contour.points_xy[valid, 1], height, width)
+        radius = max(1, int(round(narrow_band_distance)))
+        x_radius = min(2, radius)
+        for x_value, y_value in zip(x_pixels, y_pixels):
+            x0 = int(round(float(x_value)))
+            y0 = int(round(float(y_value)))
+            for yy in range(max(0, y0 - radius), min(height, y0 + radius + 1)):
+                for xx in range(max(0, x0 - x_radius), min(width, x0 + x_radius + 1)):
+                    contour_indices.append(yy * width + xx)
+    contour_pool = np.unique(np.asarray(contour_indices, dtype=np.int64)) if contour_indices else interface_pool
+    return {"interface": interface_pool, "contour": contour_pool, "global": global_pool}
+
+
+def sample_collocation_indices(
+    pools: Mapping[str, np.ndarray],
+    batch_size: int,
+    interface_fraction: float,
+    contour_fraction: float,
+    global_fraction: float,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    n_interface = int(round(batch_size * max(interface_fraction, 0.0)))
+    n_contour = int(round(batch_size * max(contour_fraction, 0.0)))
+    requested_global = int(round(batch_size * max(global_fraction, 0.0)))
+    n_global = max(0, batch_size - n_interface - n_contour)
+    if requested_global > n_global and n_interface + n_contour + requested_global <= batch_size:
+        n_global = requested_global
+
+    def choose(pool_name: str, size: int) -> np.ndarray:
+        pool = np.asarray(pools.get(pool_name, pools["global"]), dtype=np.int64)
+        if pool.size == 0:
+            pool = np.asarray(pools["global"], dtype=np.int64)
+        return rng.choice(pool, size=size, replace=pool.size < size) if size > 0 else np.empty(0, dtype=np.int64)
+
+    indices = np.concatenate(
+        [
+            choose("interface", n_interface),
+            choose("contour", n_contour),
+            choose("global", n_global),
+        ]
+    ).astype(np.int64)
+    if indices.size < batch_size:
+        indices = np.concatenate([indices, choose("global", batch_size - indices.size)])
+    rng.shuffle(indices)
+    tau = rng.uniform(1.0e-4, 1.0 - 1.0e-4, size=indices.size).astype(np.float64)
+    return indices, tau
 
 
 def contour_tensor_features(contour: ContourCondition) -> np.ndarray:

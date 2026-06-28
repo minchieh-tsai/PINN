@@ -22,9 +22,23 @@ from epi_pinn.config import (
 )
 from epi_pinn.contour import extract_contour20
 from epi_pinn.excel_io import load_state_arrays
-from epi_pinn.losses import dice_loss, endpoint_sdf_loss
+from epi_pinn.losses import (
+    dice_loss,
+    eikonal_loss,
+    endpoint_sdf_loss,
+    levelset_derivatives,
+    pde_residual_loss,
+    sign_loss,
+)
 from epi_pinn.models import DepositionPINN, EtchPINN
-from epi_pinn.sampling import build_features, full_grid_query, sample_endpoint_indices, transition_key
+from epi_pinn.sampling import (
+    build_collocation_pools,
+    build_features,
+    full_grid_query,
+    sample_collocation_indices,
+    sample_endpoint_indices,
+    transition_key,
+)
 from epi_pinn.sdf import ensure_signed_distance
 
 
@@ -54,9 +68,12 @@ def _prepare_transitions(
     process_sign = float(proc["sign"])
     level_cfg = config.get("level_set", {})
     contour_cfg = config.get("contour", {})
+    spatial_cfg = config.get("spatial", {})
     narrow_band = float(level_cfg.get("narrow_band_distance", 8.0))
     clip_distance = float(level_cfg.get("phi_clip_distance", 32.0))
     duration_reference = float(proc.get("duration_reference_s", 1.0))
+    pixel_size_x = float(spatial_cfg.get("pixel_size_x", 1.0))
+    pixel_size_y = float(spatial_cfg.get("pixel_size_y", 1.0))
     prepared: List[Dict[str, Any]] = []
 
     for transition in transitions:
@@ -113,6 +130,10 @@ def _prepare_transitions(
                 "average_rate": rate,
                 "narrow_band": narrow_band,
                 "clip_distance": clip_distance,
+                "process_sign": process_sign,
+                "length_x": max(pixel_size_x, (width - 1) * pixel_size_x),
+                "length_y": max(pixel_size_y, (height - 1) * pixel_size_y),
+                "collocation_pools": build_collocation_pools(phi_initial, contour, narrow_band),
             }
         )
     return prepared
@@ -123,6 +144,8 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     root = project_root_from_config_path(config_path)
     states = load_state_arrays(config, base_dir=root)
     training_cfg = config.get("training", {})
+    loss_cfg = config.get("loss", {})
+    sampling_cfg = config.get("sampling", {})
     device = device_name(config)
     dtype = torch_dtype(training_cfg.get("dtype", "float64"))
     torch.manual_seed(int(training_cfg.get("seed", 42)))
@@ -133,10 +156,21 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     optimizer = torch.optim.Adam(model.parameters(), lr=float(training_cfg.get("adam_lr", 1.0e-3)))
     steps = int(training_cfg.get("adam_steps", 10000))
     batch_size = int(training_cfg.get("endpoint_batch_size", 4096))
+    collocation_batch_size = int(training_cfg.get("collocation_batch_size", batch_size))
     log_every = int(training_cfg.get("log_every", 100))
     checkpoint_every = int(training_cfg.get("checkpoint_every", 500))
     grad_clip = float(training_cfg.get("grad_clip_norm", 10.0))
-    endpoint_fraction = float(config.get("sampling", {}).get("endpoint_interface_fraction", 0.70))
+    endpoint_fraction = float(sampling_cfg.get("endpoint_interface_fraction", 0.70))
+    collocation_interface_fraction = float(sampling_cfg.get("collocation_interface_fraction", 0.60))
+    collocation_contour_fraction = float(sampling_cfg.get("collocation_contour_fraction", 0.20))
+    collocation_global_fraction = float(sampling_cfg.get("collocation_global_fraction", 0.20))
+
+    lambda_sdf = float(loss_cfg.get("sdf", 1.0))
+    lambda_dice = float(loss_cfg.get("dice", 0.5))
+    lambda_pde = float(loss_cfg.get("pde", 1.0))
+    lambda_eikonal = float(loss_cfg.get("eikonal", 0.02))
+    lambda_sign = float(loss_cfg.get("sign", 0.05))
+    use_physics_terms = collocation_batch_size > 0 and (lambda_pde > 0.0 or lambda_eikonal > 0.0 or lambda_sign > 0.0)
 
     out_dir = output_dir(config, root)
     checkpoint_dir = out_dir / "checkpoints"
@@ -147,19 +181,19 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     best_path = checkpoint_dir / f"{process_name}_best.pt"
 
     best_loss = float("inf")
-    rows: List[Tuple[int, str, float, float, float]] = []
+    rows: List[Tuple[int, str, float, float, float, float, float, float]] = []
     for step in range(1, steps + 1):
         item = prepared[(step - 1) % len(prepared)]
-        indices = sample_endpoint_indices(
+        endpoint_indices = sample_endpoint_indices(
             item["phi_target"],
             batch_size,
             endpoint_fraction,
             item["narrow_band"],
             rng,
         )
-        features = torch.as_tensor(item["features"][indices], dtype=dtype, device=device)
-        raw_phi0 = torch.as_tensor(item["raw_phi0"][indices], dtype=dtype, device=device)
-        phi_target = torch.as_tensor(item["phi_target"][indices], dtype=dtype, device=device)
+        features = torch.as_tensor(item["features"][endpoint_indices], dtype=dtype, device=device)
+        raw_phi0 = torch.as_tensor(item["raw_phi0"][endpoint_indices], dtype=dtype, device=device)
+        phi_target = torch.as_tensor(item["phi_target"][endpoint_indices], dtype=dtype, device=device)
         contour = torch.as_tensor(item["contour"], dtype=dtype, device=device)
         duration = torch.tensor(float(item["duration_s"]), dtype=dtype, device=device)
         rate = torch.tensor(float(item["average_rate"]), dtype=dtype, device=device)
@@ -168,14 +202,63 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
         phi_pred, _velocity = model(features, contour, raw_phi0, duration, rate, item["clip_distance"])
         sdf = endpoint_sdf_loss(phi_pred, phi_target)
         dice = dice_loss(phi_pred, phi_target)
-        loss = float(config.get("loss", {}).get("sdf", 1.0)) * sdf + float(config.get("loss", {}).get("dice", 0.5)) * dice
+        zero = torch.zeros((), dtype=dtype, device=device)
+        pde = zero
+        eikonal = zero
+        sign = zero
+        loss = lambda_sdf * sdf + lambda_dice * dice
+
+        if use_physics_terms:
+            collocation_indices, collocation_tau = sample_collocation_indices(
+                item["collocation_pools"],
+                collocation_batch_size,
+                collocation_interface_fraction,
+                collocation_contour_fraction,
+                collocation_global_fraction,
+                rng,
+            )
+            collocation_features_np = item["features"][collocation_indices].copy()
+            collocation_features_np[:, 2] = collocation_tau
+            collocation_features = torch.as_tensor(collocation_features_np, dtype=dtype, device=device).requires_grad_(True)
+            collocation_raw_phi0 = torch.as_tensor(item["raw_phi0"][collocation_indices], dtype=dtype, device=device)
+            collocation_phi, collocation_velocity = model(
+                collocation_features,
+                contour,
+                collocation_raw_phi0,
+                duration,
+                rate,
+                item["clip_distance"],
+            )
+            phi_x, phi_y, phi_t = levelset_derivatives(
+                collocation_phi,
+                collocation_features,
+                duration,
+                item["length_x"],
+                item["length_y"],
+            )
+            pde = pde_residual_loss(phi_x, phi_y, phi_t, collocation_velocity)
+            eikonal = eikonal_loss(phi_x, phi_y)
+            sign = sign_loss(phi_t, float(item["process_sign"]))
+            loss = loss + lambda_pde * pde + lambda_eikonal * eikonal + lambda_sign * sign
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
         loss_value = float(loss.detach().cpu())
         if step % log_every == 0 or step == 1:
-            rows.append((step, str(item["id"]), loss_value, float(sdf.detach().cpu()), float(dice.detach().cpu())))
+            rows.append(
+                (
+                    step,
+                    str(item["id"]),
+                    loss_value,
+                    float(sdf.detach().cpu()),
+                    float(dice.detach().cpu()),
+                    float(pde.detach().cpu()),
+                    float(eikonal.detach().cpu()),
+                    float(sign.detach().cpu()),
+                )
+            )
         if loss_value < best_loss or step % checkpoint_every == 0:
             if loss_value < best_loss:
                 best_loss = loss_value
@@ -191,6 +274,6 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
 
     with log_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["step", "transition_id", "loss", "sdf_loss", "dice_loss"])
+        writer.writerow(["step", "transition_id", "loss", "sdf_loss", "dice_loss", "pde_loss", "eikonal_loss", "sign_loss"])
         writer.writerows(rows)
     return best_path
