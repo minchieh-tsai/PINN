@@ -36,6 +36,14 @@ def main() -> int:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--prediction-dir", default=None, help="Directory containing 3M.npy ... 5E.npy")
     parser.add_argument("--output", default=None, help="Output PNG path")
+    parser.add_argument(
+        "--contour-mode",
+        choices=["main", "filtered", "all"],
+        default="main",
+        help="main draws one selected interface; filtered removes tiny/border components; all draws every phi=0 component",
+    )
+    parser.add_argument("--min-contour-points", type=int, default=25)
+    parser.add_argument("--border-margin", type=float, default=2.0)
     args = parser.parse_args()
 
     root = add_src_path()
@@ -68,6 +76,9 @@ def main() -> int:
         ROLLOUT_STATES,
         gt_arrays=gt_arrays,
         title="Rollout prediction phi=0 contours (GT overlay for 5M/5E)",
+        contour_mode=args.contour_mode,
+        min_contour_points=args.min_contour_points,
+        border_margin=args.border_margin,
     )
     print(f"Saved figure: {output}")
     return 0

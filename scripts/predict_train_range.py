@@ -29,6 +29,14 @@ def main() -> int:
     parser.add_argument("--output-dir", default=None, help="Directory for 1M.npy ... 2E.npy")
     parser.add_argument("--figure", default=None, help="Output PNG path")
     parser.add_argument("--no-plot", action="store_true", help="Only save prediction npy files")
+    parser.add_argument(
+        "--contour-mode",
+        choices=["main", "filtered", "all"],
+        default="main",
+        help="main draws one selected interface; filtered removes tiny/border components; all draws every phi=0 component",
+    )
+    parser.add_argument("--min-contour-points", type=int, default=25)
+    parser.add_argument("--border-margin", type=float, default=2.0)
     args = parser.parse_args()
 
     import numpy as np
@@ -115,6 +123,9 @@ def main() -> int:
             TRAIN_RANGE_STATES,
             gt_arrays=gt_arrays,
             title="Train-range prediction phi=0 contours (GT overlay)",
+            contour_mode=args.contour_mode,
+            min_contour_points=args.min_contour_points,
+            border_margin=args.border_margin,
         )
         print(f"Saved figure: {figure}")
 
