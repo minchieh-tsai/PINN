@@ -12,7 +12,6 @@ from epi_pinn.config import load_config, output_dir, project_root_from_config_pa
 from epi_pinn.contour import ContourCondition, extract_contour20
 from epi_pinn.excel_io import load_state_arrays
 from epi_pinn.geometry import normalized_to_pixel_xy, spatial_gradients
-from epi_pinn.sdf import ensure_signed_distance, material_mask
 
 
 def dice_iou(pred_mask: np.ndarray, target_mask: np.ndarray) -> Dict[str, float]:
@@ -27,17 +26,54 @@ def dice_iou(pred_mask: np.ndarray, target_mask: np.ndarray) -> Dict[str, float]
     return {"dice": dice, "iou": iou}
 
 
+def _material_mask(phi: np.ndarray) -> np.ndarray:
+    return np.asarray(phi) < 0
+
+
 def _contour_pixels(contour: ContourCondition, height: int, width: int) -> np.ndarray:
     x, y = normalized_to_pixel_xy(contour.points_xy[:, 0], contour.points_xy[:, 1], height, width)
     return np.stack([x, y], axis=1)
 
 
+def _find_zero_contours(phi: np.ndarray) -> list:
+    from skimage import measure
+
+    return measure.find_contours(np.asarray(phi, dtype=np.float64), level=0.0)
+
+
+def _zero_contour_points(phi: np.ndarray) -> np.ndarray:
+    contours = _find_zero_contours(phi)
+    if not contours:
+        return np.empty((0, 2), dtype=np.float64)
+
+    point_sets = []
+    for contour in contours:
+        contour_array = np.asarray(contour, dtype=np.float64)
+        if contour_array.size == 0:
+            continue
+        # skimage returns (row, col), while Chamfer uses pixel (x, y).
+        point_sets.append(np.stack([contour_array[:, 1], contour_array[:, 0]], axis=1))
+    if not point_sets:
+        return np.empty((0, 2), dtype=np.float64)
+    return np.ascontiguousarray(np.concatenate(point_sets, axis=0), dtype=np.float64)
+
+
+def _mean_min_distance(points_a: np.ndarray, points_b: np.ndarray, chunk_size: int = 4096) -> float:
+    minima = []
+    for start in range(0, points_a.shape[0], chunk_size):
+        chunk = points_a[start : start + chunk_size]
+        diff = chunk[:, None, :] - points_b[None, :, :]
+        dist_sq = np.sum(diff * diff, axis=2)
+        minima.append(np.sqrt(np.min(dist_sq, axis=1)))
+    return float(np.mean(np.concatenate(minima)))
+
+
 def _symmetric_chamfer(points_a: np.ndarray, points_b: np.ndarray) -> float:
-    if points_a.size == 0 or points_b.size == 0:
+    a = np.asarray(points_a, dtype=np.float64).reshape(-1, 2)
+    b = np.asarray(points_b, dtype=np.float64).reshape(-1, 2)
+    if a.size == 0 or b.size == 0:
         return float("nan")
-    diff = points_a[:, None, :] - points_b[None, :, :]
-    dist = np.sqrt(np.sum(diff * diff, axis=2))
-    return float(np.mean(np.min(dist, axis=1)) + np.mean(np.min(dist, axis=0)))
+    return _mean_min_distance(a, b) + _mean_min_distance(b, a)
 
 
 def _contour_metrics(phi_pred: np.ndarray, phi_target: np.ndarray, contour_config: Mapping[str, Any]) -> Dict[str, float]:
@@ -63,11 +99,15 @@ def _contour_metrics(phi_pred: np.ndarray, phi_target: np.ndarray, contour_confi
         y_mae = float(np.mean(np.abs(y_pred - y_true)))
     else:
         y_mae = float("nan")
-    pred_points = _contour_pixels(pred_contour, height, width)[pred_contour.valid_mask > 0.0]
-    true_points = _contour_pixels(target_contour, height, width)[target_contour.valid_mask > 0.0]
+
+    pred_contour20_points = _contour_pixels(pred_contour, height, width)[pred_contour.valid_mask > 0.0]
+    true_contour20_points = _contour_pixels(target_contour, height, width)[target_contour.valid_mask > 0.0]
+    pred_zero_points = _zero_contour_points(phi_pred)
+    true_zero_points = _zero_contour_points(phi_target)
     return {
         "contour20_y_mae_px": y_mae,
-        "zero_contour_symmetric_chamfer_px": _symmetric_chamfer(pred_points, true_points),
+        "contour20_symmetric_chamfer_px": _symmetric_chamfer(pred_contour20_points, true_contour20_points),
+        "zero_contour_symmetric_chamfer_px": _symmetric_chamfer(pred_zero_points, true_zero_points),
     }
 
 
@@ -81,9 +121,11 @@ def evaluate_pair(phi_pred: np.ndarray, phi_target: np.ndarray, config: Mapping[
     narrow_mask = np.abs(target) <= narrow
     if not narrow_mask.any():
         narrow_mask = np.ones(target.shape, dtype=bool)
-    mask_metrics = dice_iou(material_mask(pred), material_mask(target))
-    area_target = float(material_mask(target).sum())
-    area_pred = float(material_mask(pred).sum())
+    pred_mask = _material_mask(pred)
+    target_mask = _material_mask(target)
+    mask_metrics = dice_iou(pred_mask, target_mask)
+    area_target = float(target_mask.sum())
+    area_pred = float(pred_mask.sum())
     phi_x, phi_y = spatial_gradients(pred)
     eikonal_error = np.mean(np.abs(np.sqrt(phi_x * phi_x + phi_y * phi_y + 1.0e-12) - 1.0))
 
@@ -100,6 +142,8 @@ def evaluate_pair(phi_pred: np.ndarray, phi_target: np.ndarray, config: Mapping[
 
 
 def evaluate_holdout(config_path: str) -> Dict[str, Dict[str, float]]:
+    from epi_pinn.sdf import ensure_signed_distance
+
     config = load_config(config_path)
     root = project_root_from_config_path(config_path)
     out_dir = output_dir(config, root)
