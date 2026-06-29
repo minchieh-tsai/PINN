@@ -28,6 +28,10 @@ class LevelSetPINN(nn.Module):
         self.process_sign = float(process_sign)
         self.correction_scale = float(model_config.get("correction_scale", 0.5))
         self.velocity_residual_fraction = float(model_config.get("velocity_residual_fraction", 0.5))
+        self.use_curvature_velocity = bool(model_config.get("use_curvature_velocity", False))
+        self.curvature_velocity_weight = float(model_config.get("curvature_velocity_weight", 0.0))
+        self.curvature_velocity_sign = float(model_config.get("curvature_velocity_sign", 1.0))
+        self.curvature_reference = float(model_config.get("curvature_reference", 0.1))
         self.hard_initial_condition = bool(model_config.get("hard_initial_condition", True))
         embedding_dim = int(model_config.get("contour_embedding_dim", 64))
         solution_hidden = int(model_config.get("solution_hidden_dim", 128))
@@ -76,6 +80,17 @@ class LevelSetPINN(nn.Module):
             * average_rate
             * (1.0 + self.velocity_residual_fraction * torch.tanh(v_psi))
         )
+        if self.use_curvature_velocity and self.curvature_velocity_weight != 0.0:
+            kappa0 = features[:, 11]
+            curvature_reference = max(self.curvature_reference, 1.0e-12)
+            curvature_effect = torch.tanh(kappa0 / curvature_reference)
+            velocity = velocity + (
+                self.curvature_velocity_sign
+                * self.process_sign
+                * average_rate
+                * self.curvature_velocity_weight
+                * curvature_effect
+            )
         return phi, velocity
 
     @torch.no_grad()

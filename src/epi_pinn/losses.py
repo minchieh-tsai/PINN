@@ -84,3 +84,30 @@ def sign_loss(phi_t: torch.Tensor, process_sign: float) -> torch.Tensor:
     if process_sign > 0:
         return torch.mean(torch.relu(phi_t) ** 2)
     return torch.mean(torch.relu(-phi_t) ** 2)
+
+
+def velocity_jacobian_loss(
+    normal_velocity: torch.Tensor,
+    features: torch.Tensor,
+    length_x: float,
+    length_y: float,
+) -> torch.Tensor:
+    """Penalize spatial roughness in predicted normal velocity."""
+
+    if not normal_velocity.requires_grad:
+        return torch.zeros((), dtype=normal_velocity.dtype, device=normal_velocity.device)
+
+    grads = torch.autograd.grad(
+        outputs=normal_velocity,
+        inputs=features,
+        grad_outputs=torch.ones_like(normal_velocity),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+        allow_unused=True,
+    )[0]
+    if grads is None:
+        return torch.zeros((), dtype=normal_velocity.dtype, device=normal_velocity.device)
+    velocity_x = grads[:, 0] * (2.0 / float(length_x))
+    velocity_y = grads[:, 1] * (2.0 / float(length_y))
+    return torch.mean(velocity_x * velocity_x + velocity_y * velocity_y)

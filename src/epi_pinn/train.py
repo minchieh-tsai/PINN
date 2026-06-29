@@ -29,6 +29,7 @@ from epi_pinn.losses import (
     levelset_derivatives,
     pde_residual_loss,
     sign_loss,
+    velocity_jacobian_loss,
 )
 from epi_pinn.models import DepositionPINN, EtchPINN
 from epi_pinn.sampling import (
@@ -170,7 +171,13 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     lambda_pde = float(loss_cfg.get("pde", 1.0))
     lambda_eikonal = float(loss_cfg.get("eikonal", 0.02))
     lambda_sign = float(loss_cfg.get("sign", 0.05))
-    use_physics_terms = collocation_batch_size > 0 and (lambda_pde > 0.0 or lambda_eikonal > 0.0 or lambda_sign > 0.0)
+    lambda_velocity_jacobian = float(loss_cfg.get("velocity_jacobian", 0.0))
+    use_physics_terms = collocation_batch_size > 0 and (
+        lambda_pde > 0.0
+        or lambda_eikonal > 0.0
+        or lambda_sign > 0.0
+        or lambda_velocity_jacobian > 0.0
+    )
 
     out_dir = output_dir(config, root)
     checkpoint_dir = out_dir / "checkpoints"
@@ -181,7 +188,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     best_path = checkpoint_dir / f"{process_name}_best.pt"
 
     best_loss = float("inf")
-    rows: List[Tuple[int, str, float, float, float, float, float, float]] = []
+    rows: List[Tuple[int, str, float, float, float, float, float, float, float]] = []
     for step in range(1, steps + 1):
         item = prepared[(step - 1) % len(prepared)]
         endpoint_indices = sample_endpoint_indices(
@@ -206,6 +213,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
         pde = zero
         eikonal = zero
         sign = zero
+        velocity_jacobian = zero
         loss = lambda_sdf * sdf + lambda_dice * dice
 
         if use_physics_terms:
@@ -239,7 +247,20 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
             pde = pde_residual_loss(phi_x, phi_y, phi_t, collocation_velocity)
             eikonal = eikonal_loss(phi_x, phi_y)
             sign = sign_loss(phi_t, float(item["process_sign"]))
-            loss = loss + lambda_pde * pde + lambda_eikonal * eikonal + lambda_sign * sign
+            if lambda_velocity_jacobian > 0.0:
+                velocity_jacobian = velocity_jacobian_loss(
+                    collocation_velocity,
+                    collocation_features,
+                    item["length_x"],
+                    item["length_y"],
+                )
+            loss = (
+                loss
+                + lambda_pde * pde
+                + lambda_eikonal * eikonal
+                + lambda_sign * sign
+                + lambda_velocity_jacobian * velocity_jacobian
+            )
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -257,6 +278,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                     float(pde.detach().cpu()),
                     float(eikonal.detach().cpu()),
                     float(sign.detach().cpu()),
+                    float(velocity_jacobian.detach().cpu()),
                 )
             )
         if loss_value < best_loss or step % checkpoint_every == 0:
@@ -274,6 +296,18 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
 
     with log_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["step", "transition_id", "loss", "sdf_loss", "dice_loss", "pde_loss", "eikonal_loss", "sign_loss"])
+        writer.writerow(
+            [
+                "step",
+                "transition_id",
+                "loss",
+                "sdf_loss",
+                "dice_loss",
+                "pde_loss",
+                "eikonal_loss",
+                "sign_loss",
+                "velocity_jacobian_loss",
+            ]
+        )
         writer.writerows(rows)
     return best_path

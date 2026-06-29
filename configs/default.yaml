@@ -91,6 +91,10 @@ model:
   correction_scale: 0.20
   velocity_residual_fraction: 0.20
   use_curvature_feature: true
+  use_curvature_velocity: true
+  curvature_velocity_weight: 0.01
+  curvature_velocity_sign: 1.0
+  curvature_reference: 0.1
 
 loss:
   sdf: 1.0
@@ -98,7 +102,7 @@ loss:
   pde: 0.2
   eikonal: 0.10
   average_rate: 0.5
-  velocity_jacobian: 1.0e-4
+  velocity_jacobian: 1.0e-3
   sign: 0.05
   area_monotonic: 0.1
   contour_initial_condition: 0.1
