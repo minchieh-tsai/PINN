@@ -81,6 +81,19 @@ artifacts/figures/train_range_zero_contours_1M_to_2E.png
 If you want to run without trained checkpoints, add `--allow-baseline-fallback`.
 That uses the known-average-rate baseline instead of the PINN checkpoints.
 
+Plot training loss curves and weighted contribution ratios after training:
+
+```bash
+python scripts/plot_training_losses.py --config configs/default.yaml
+```
+
+This saves a three-column figure with raw losses, weighted losses, and weighted
+loss share:
+
+```text
+artifacts/figures/training_loss_breakdown.png
+```
+
 ## Notes
 
 The generated code intentionally does not create `tests/`, pytest files, or CI
