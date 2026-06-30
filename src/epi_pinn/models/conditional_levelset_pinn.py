@@ -23,9 +23,9 @@ def _mlp(input_dim: int, hidden_dim: int, depth: int, output_dim: int) -> nn.Seq
     return nn.Sequential(*layers)
 
 
-def _atanh_clamped(value: float, eps: float = 1.0e-6) -> float:
-    clipped = max(min(float(value), 1.0 - eps), -1.0 + eps)
-    return math.atanh(clipped)
+def _logit_clamped(value: float, eps: float = 1.0e-6) -> float:
+    clipped = max(min(float(value), 1.0 - eps), eps)
+    return math.log(clipped / (1.0 - clipped))
 
 
 class LevelSetPINN(nn.Module):
@@ -44,7 +44,12 @@ class LevelSetPINN(nn.Module):
         if self.curvature_velocity_weight_max <= 0.0:
             raise ValueError("curvature_velocity_weight_max must be positive")
         if self.learn_curvature_velocity_weight:
-            raw_weight = _atanh_clamped(initial_curvature_velocity_weight / self.curvature_velocity_weight_max)
+            if initial_curvature_velocity_weight < 0.0:
+                raise ValueError(
+                    "curvature_velocity_weight must be non-negative when "
+                    "learn_curvature_velocity_weight is true; use curvature_velocity_sign for direction"
+                )
+            raw_weight = _logit_clamped(initial_curvature_velocity_weight / self.curvature_velocity_weight_max)
             self.raw_curvature_velocity_weight = nn.Parameter(torch.tensor(raw_weight, dtype=torch.float32))
         else:
             self.curvature_velocity_weight = initial_curvature_velocity_weight
@@ -64,7 +69,7 @@ class LevelSetPINN(nn.Module):
 
     def curvature_velocity_weight_value(self) -> torch.Tensor:
         if self.learn_curvature_velocity_weight:
-            return self.curvature_velocity_weight_max * torch.tanh(self.raw_curvature_velocity_weight)
+            return self.curvature_velocity_weight_max * torch.sigmoid(self.raw_curvature_velocity_weight)
         return torch.tensor(float(self.curvature_velocity_weight), dtype=torch.float32)
 
     def _curvature_velocity_weight_for(self, features: torch.Tensor) -> torch.Tensor:

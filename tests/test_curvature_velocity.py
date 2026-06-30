@@ -82,6 +82,28 @@ class CurvatureVelocityTests(unittest.TestCase):
         self.assertIsNotNone(params["raw_curvature_velocity_weight"].grad)
         self.assertNotEqual(float(params["raw_curvature_velocity_weight"].grad.detach()), 0.0)
 
+    def test_learned_curvature_velocity_weight_stays_non_negative(self):
+        model = DepositionPINN(
+            {
+                "solution_hidden_dim": 4,
+                "solution_depth": 1,
+                "velocity_hidden_dim": 4,
+                "velocity_depth": 1,
+                "contour_embedding_dim": 4,
+                "use_curvature_velocity": True,
+                "learn_curvature_velocity_weight": True,
+                "curvature_velocity_weight": 0.01,
+                "curvature_velocity_weight_max": 0.05,
+            }
+        )
+
+        with torch.no_grad():
+            model.raw_curvature_velocity_weight.fill_(-100.0)
+        beta_kappa = float(model.curvature_velocity_weight_value().detach())
+
+        self.assertGreaterEqual(beta_kappa, 0.0)
+        self.assertLessEqual(beta_kappa, 0.05)
+
     def test_velocity_jacobian_loss_penalizes_spatial_velocity_gradients(self):
         self.assertTrue(hasattr(losses, "velocity_jacobian_loss"))
         features = torch.zeros((3, len(FEATURE_NAMES)), dtype=torch.float64, requires_grad=True)
