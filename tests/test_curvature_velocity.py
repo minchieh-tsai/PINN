@@ -24,6 +24,7 @@ class CurvatureVelocityTests(unittest.TestCase):
                 "contour_embedding_dim": 4,
                 "velocity_residual_fraction": 0.0,
                 "use_curvature_velocity": True,
+                "learn_curvature_velocity_weight": False,
                 "curvature_velocity_weight": 0.25,
                 "curvature_velocity_sign": 1.0,
                 "curvature_reference": 0.5,
@@ -40,6 +41,46 @@ class CurvatureVelocityTests(unittest.TestCase):
 
         expected = average_rate * (1.0 + 0.25 * torch.tanh(features[:, 11] / 0.5))
         torch.testing.assert_close(velocity, expected)
+
+    def test_curvature_velocity_weight_can_be_learned(self):
+        dtype = torch.float64
+        model = DepositionPINN(
+            {
+                "solution_hidden_dim": 4,
+                "solution_depth": 1,
+                "velocity_hidden_dim": 4,
+                "velocity_depth": 1,
+                "contour_embedding_dim": 4,
+                "velocity_residual_fraction": 0.0,
+                "use_curvature_velocity": True,
+                "learn_curvature_velocity_weight": True,
+                "curvature_velocity_weight": 0.01,
+                "curvature_velocity_weight_max": 0.05,
+                "curvature_velocity_sign": 1.0,
+                "curvature_reference": 0.5,
+            }
+        ).to(dtype=dtype)
+        params = dict(model.named_parameters())
+        self.assertIn("raw_curvature_velocity_weight", params)
+        torch.testing.assert_close(
+            model.curvature_velocity_weight_value().detach(),
+            torch.tensor(0.01, dtype=dtype),
+            rtol=1.0e-6,
+            atol=1.0e-8,
+        )
+
+        features = torch.zeros((1, len(FEATURE_NAMES)), dtype=dtype)
+        features[:, 11] = torch.tensor([0.5], dtype=dtype)
+        contour = torch.zeros((20, 3), dtype=dtype)
+        raw_phi0 = torch.zeros(1, dtype=dtype)
+        duration = torch.tensor(1.0, dtype=dtype)
+        average_rate = torch.tensor(2.0, dtype=dtype)
+
+        _phi, velocity = model(features, contour, raw_phi0, duration, average_rate, 32.0)
+        velocity.sum().backward()
+
+        self.assertIsNotNone(params["raw_curvature_velocity_weight"].grad)
+        self.assertNotEqual(float(params["raw_curvature_velocity_weight"].grad.detach()), 0.0)
 
     def test_velocity_jacobian_loss_penalizes_spatial_velocity_gradients(self):
         self.assertTrue(hasattr(losses, "velocity_jacobian_loss"))

@@ -55,6 +55,14 @@ def make_model(process_name: str, config: Mapping[str, Any]) -> torch.nn.Module:
     raise ValueError("process_name must be 'deposition' or 'etch'")
 
 
+def current_beta_kappa(model: torch.nn.Module) -> float:
+    value_fn = getattr(model, "curvature_velocity_weight_value", None)
+    if value_fn is None:
+        return float("nan")
+    with torch.no_grad():
+        return float(value_fn().detach().cpu())
+
+
 def _prepare_transitions(
     config: Mapping[str, Any],
     states: Mapping[str, np.ndarray],
@@ -188,7 +196,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     best_path = checkpoint_dir / f"{process_name}_best.pt"
 
     best_loss = float("inf")
-    rows: List[Tuple[int, str, float, float, float, float, float, float, float]] = []
+    rows: List[Tuple[int, str, float, float, float, float, float, float, float, float]] = []
     for step in range(1, steps + 1):
         item = prepared[(step - 1) % len(prepared)]
         endpoint_indices = sample_endpoint_indices(
@@ -267,6 +275,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
         optimizer.step()
 
         loss_value = float(loss.detach().cpu())
+        beta_kappa = current_beta_kappa(model)
         if step % log_every == 0 or step == 1:
             rows.append(
                 (
@@ -279,7 +288,13 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                     float(eikonal.detach().cpu()),
                     float(sign.detach().cpu()),
                     float(velocity_jacobian.detach().cpu()),
+                    beta_kappa,
                 )
+            )
+            print(
+                f"[{process_name}] step={step}/{steps} transition={item['id']} "
+                f"loss={loss_value:.6g} beta_kappa={beta_kappa:.6g}",
+                flush=True,
             )
         if loss_value < best_loss or step % checkpoint_every == 0:
             if loss_value < best_loss:
@@ -307,6 +322,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                 "eikonal_loss",
                 "sign_loss",
                 "velocity_jacobian_loss",
+                "beta_kappa",
             ]
         )
         writer.writerows(rows)

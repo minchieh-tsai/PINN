@@ -41,7 +41,15 @@ def _load_model(config: Mapping[str, Any], process_name: str, checkpoint_path: P
         return None
     model = DepositionPINN(config.get("model", {})) if process_name == "deposition" else EtchPINN(config.get("model", {}))
     checkpoint = torch.load(str(checkpoint_path), map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    load_result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    allowed_keys = {"raw_curvature_velocity_weight"}
+    missing = [key for key in load_result.missing_keys if key not in allowed_keys]
+    unexpected = [key for key in load_result.unexpected_keys if key not in allowed_keys]
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_path} is incompatible with the model; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
     model.to(device=device, dtype=dtype)
     model.eval()
     return model

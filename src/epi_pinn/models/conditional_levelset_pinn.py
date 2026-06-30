@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Tuple
 
 import torch
@@ -22,6 +23,11 @@ def _mlp(input_dim: int, hidden_dim: int, depth: int, output_dim: int) -> nn.Seq
     return nn.Sequential(*layers)
 
 
+def _atanh_clamped(value: float, eps: float = 1.0e-6) -> float:
+    clipped = max(min(float(value), 1.0 - eps), -1.0 + eps)
+    return math.atanh(clipped)
+
+
 class LevelSetPINN(nn.Module):
     def __init__(self, process_sign: float, model_config: Mapping[str, Any]) -> None:
         super().__init__()
@@ -29,7 +35,19 @@ class LevelSetPINN(nn.Module):
         self.correction_scale = float(model_config.get("correction_scale", 0.5))
         self.velocity_residual_fraction = float(model_config.get("velocity_residual_fraction", 0.5))
         self.use_curvature_velocity = bool(model_config.get("use_curvature_velocity", False))
-        self.curvature_velocity_weight = float(model_config.get("curvature_velocity_weight", 0.0))
+        initial_curvature_velocity_weight = float(model_config.get("curvature_velocity_weight", 0.0))
+        self.learn_curvature_velocity_weight = bool(model_config.get("learn_curvature_velocity_weight", False))
+        default_curvature_velocity_weight_max = max(abs(initial_curvature_velocity_weight) * 5.0, 1.0e-6)
+        self.curvature_velocity_weight_max = float(
+            model_config.get("curvature_velocity_weight_max", default_curvature_velocity_weight_max)
+        )
+        if self.curvature_velocity_weight_max <= 0.0:
+            raise ValueError("curvature_velocity_weight_max must be positive")
+        if self.learn_curvature_velocity_weight:
+            raw_weight = _atanh_clamped(initial_curvature_velocity_weight / self.curvature_velocity_weight_max)
+            self.raw_curvature_velocity_weight = nn.Parameter(torch.tensor(raw_weight, dtype=torch.float32))
+        else:
+            self.curvature_velocity_weight = initial_curvature_velocity_weight
         self.curvature_velocity_sign = float(model_config.get("curvature_velocity_sign", 1.0))
         self.curvature_reference = float(model_config.get("curvature_reference", 0.1))
         self.hard_initial_condition = bool(model_config.get("hard_initial_condition", True))
@@ -43,6 +61,14 @@ class LevelSetPINN(nn.Module):
         self.contour_encoder = ContourEncoder(embedding_dim=embedding_dim)
         self.solution_net = _mlp(base_dim + embedding_dim, solution_hidden, solution_depth, 1)
         self.velocity_net = _mlp(base_dim + embedding_dim, velocity_hidden, velocity_depth, 1)
+
+    def curvature_velocity_weight_value(self) -> torch.Tensor:
+        if self.learn_curvature_velocity_weight:
+            return self.curvature_velocity_weight_max * torch.tanh(self.raw_curvature_velocity_weight)
+        return torch.tensor(float(self.curvature_velocity_weight), dtype=torch.float32)
+
+    def _curvature_velocity_weight_for(self, features: torch.Tensor) -> torch.Tensor:
+        return self.curvature_velocity_weight_value().to(dtype=features.dtype, device=features.device)
 
     def _compose_features(self, features: torch.Tensor, contour_features: torch.Tensor) -> torch.Tensor:
         if contour_features.ndim == 2:
@@ -80,7 +106,7 @@ class LevelSetPINN(nn.Module):
             * average_rate
             * (1.0 + self.velocity_residual_fraction * torch.tanh(v_psi))
         )
-        if self.use_curvature_velocity and self.curvature_velocity_weight != 0.0:
+        if self.use_curvature_velocity:
             kappa0 = features[:, 11]
             curvature_reference = max(self.curvature_reference, 1.0e-12)
             curvature_effect = torch.tanh(kappa0 / curvature_reference)
@@ -88,7 +114,7 @@ class LevelSetPINN(nn.Module):
                 self.curvature_velocity_sign
                 * self.process_sign
                 * average_rate
-                * self.curvature_velocity_weight
+                * self._curvature_velocity_weight_for(features)
                 * curvature_effect
             )
         return phi, velocity
