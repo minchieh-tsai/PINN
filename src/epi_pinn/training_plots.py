@@ -25,6 +25,7 @@ LOSS_COMPONENTS = (
     LossComponent("eikonal", "eikonal_loss", "eikonal", "Eikonal"),
     LossComponent("sign", "sign_loss", "sign", "Sign"),
     LossComponent("velocity_jacobian", "velocity_jacobian_loss", "velocity_jacobian", "Velocity Jacobian"),
+    LossComponent("curvature_velocity", "curvature_velocity_loss", "curvature_velocity", "Curvature Velocity"),
 )
 
 
@@ -35,6 +36,7 @@ LOSS_COLORS = {
     "eikonal": "#8b5cf6",
     "sign": "#f59e0b",
     "velocity_jacobian": "#14b8a6",
+    "curvature_velocity": "#ec4899",
 }
 
 

@@ -86,6 +86,12 @@ def sign_loss(phi_t: torch.Tensor, process_sign: float) -> torch.Tensor:
     return torch.mean(torch.relu(-phi_t) ** 2)
 
 
+def curvature_velocity_loss(curvature_velocity: torch.Tensor) -> torch.Tensor:
+    """Penalize large curvature-driven velocity corrections."""
+
+    return torch.mean(curvature_velocity * curvature_velocity)
+
+
 def velocity_jacobian_loss(
     normal_velocity: torch.Tensor,
     features: torch.Tensor,

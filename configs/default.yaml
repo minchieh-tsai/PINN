@@ -90,12 +90,22 @@ model:
   hard_initial_condition: true
   correction_scale: 0.20
   velocity_residual_fraction: 0.20
+  use_transport_velocity: true
+  learn_transport_alpha: true
+  transport_alpha: 0.05
+  transport_alpha_max: 1.0
+  learn_transport_ld: true
+  transport_ld: 50.0
+  transport_ld_min: 1.0
+  transport_depth_unit: pixel
   use_curvature_feature: true
   use_curvature_velocity: true
   learn_curvature_velocity_weight: true
   curvature_velocity_weight: 0.01
   curvature_velocity_weight_max: 0.05
   curvature_velocity_sign: 1.0
+  curvature_velocity_form: linear
+  curvature_mcoeff: 1.0
   curvature_reference: 0.1
 
 loss:
@@ -105,6 +115,7 @@ loss:
   eikonal: 0.10
   average_rate: 0.5
   velocity_jacobian: 1.0e-3
+  curvature_velocity: 1.0e-3
   sign: 0.05
   area_monotonic: 0.1
   contour_initial_condition: 0.1

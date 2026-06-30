@@ -23,6 +23,7 @@ from epi_pinn.config import (
 from epi_pinn.contour import extract_contour20
 from epi_pinn.excel_io import load_state_arrays
 from epi_pinn.losses import (
+    curvature_velocity_loss,
     dice_loss,
     eikonal_loss,
     endpoint_sdf_loss,
@@ -55,12 +56,24 @@ def make_model(process_name: str, config: Mapping[str, Any]) -> torch.nn.Module:
     raise ValueError("process_name must be 'deposition' or 'etch'")
 
 
-def current_beta_kappa(model: torch.nn.Module) -> float:
-    value_fn = getattr(model, "curvature_velocity_weight_value", None)
+def _current_scalar_parameter(model: torch.nn.Module, method_name: str) -> float:
+    value_fn = getattr(model, method_name, None)
     if value_fn is None:
         return float("nan")
     with torch.no_grad():
         return float(value_fn().detach().cpu())
+
+
+def current_beta_kappa(model: torch.nn.Module) -> float:
+    return _current_scalar_parameter(model, "curvature_velocity_weight_value")
+
+
+def current_transport_alpha(model: torch.nn.Module) -> float:
+    return _current_scalar_parameter(model, "transport_alpha_value")
+
+
+def current_transport_ld(model: torch.nn.Module) -> float:
+    return _current_scalar_parameter(model, "transport_ld_value")
 
 
 def _prepare_transitions(
@@ -180,11 +193,13 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     lambda_eikonal = float(loss_cfg.get("eikonal", 0.02))
     lambda_sign = float(loss_cfg.get("sign", 0.05))
     lambda_velocity_jacobian = float(loss_cfg.get("velocity_jacobian", 0.0))
+    lambda_curvature_velocity = float(loss_cfg.get("curvature_velocity", 0.0))
     use_physics_terms = collocation_batch_size > 0 and (
         lambda_pde > 0.0
         or lambda_eikonal > 0.0
         or lambda_sign > 0.0
         or lambda_velocity_jacobian > 0.0
+        or lambda_curvature_velocity > 0.0
     )
 
     out_dir = output_dir(config, root)
@@ -196,7 +211,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     best_path = checkpoint_dir / f"{process_name}_best.pt"
 
     best_loss = float("inf")
-    rows: List[Tuple[int, str, float, float, float, float, float, float, float, float]] = []
+    rows: List[Tuple[int, str, float, float, float, float, float, float, float, float, float, float, float]] = []
     for step in range(1, steps + 1):
         item = prepared[(step - 1) % len(prepared)]
         endpoint_indices = sample_endpoint_indices(
@@ -222,6 +237,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
         eikonal = zero
         sign = zero
         velocity_jacobian = zero
+        curvature_velocity = zero
         loss = lambda_sdf * sdf + lambda_dice * dice
 
         if use_physics_terms:
@@ -244,6 +260,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                 duration,
                 rate,
                 item["clip_distance"],
+                length_y=item["length_y"],
             )
             phi_x, phi_y, phi_t = levelset_derivatives(
                 collocation_phi,
@@ -262,12 +279,21 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                     item["length_x"],
                     item["length_y"],
                 )
+            if lambda_curvature_velocity > 0.0:
+                velocity_components = model.velocity_components(
+                    collocation_features,
+                    contour,
+                    rate,
+                    length_y=item["length_y"],
+                )
+                curvature_velocity = curvature_velocity_loss(velocity_components["curvature"])
             loss = (
                 loss
                 + lambda_pde * pde
                 + lambda_eikonal * eikonal
                 + lambda_sign * sign
                 + lambda_velocity_jacobian * velocity_jacobian
+                + lambda_curvature_velocity * curvature_velocity
             )
 
         loss.backward()
@@ -276,6 +302,8 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
 
         loss_value = float(loss.detach().cpu())
         beta_kappa = current_beta_kappa(model)
+        transport_alpha = current_transport_alpha(model)
+        transport_ld = current_transport_ld(model)
         if step % log_every == 0 or step == 1:
             rows.append(
                 (
@@ -288,12 +316,16 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                     float(eikonal.detach().cpu()),
                     float(sign.detach().cpu()),
                     float(velocity_jacobian.detach().cpu()),
+                    float(curvature_velocity.detach().cpu()),
                     beta_kappa,
+                    transport_alpha,
+                    transport_ld,
                 )
             )
             print(
                 f"[{process_name}] step={step}/{steps} transition={item['id']} "
-                f"loss={loss_value:.6g} beta_kappa={beta_kappa:.6g}",
+                f"loss={loss_value:.6g} beta_kappa={beta_kappa:.6g} "
+                f"alpha_transport={transport_alpha:.6g} Ld={transport_ld:.6g}",
                 flush=True,
             )
         if loss_value < best_loss or step % checkpoint_every == 0:
@@ -322,7 +354,10 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                 "eikonal_loss",
                 "sign_loss",
                 "velocity_jacobian_loss",
+                "curvature_velocity_loss",
                 "beta_kappa",
+                "transport_alpha",
+                "transport_ld",
             ]
         )
         writer.writerows(rows)

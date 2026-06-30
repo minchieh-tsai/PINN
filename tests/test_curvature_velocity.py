@@ -13,6 +13,75 @@ import epi_pinn.losses as losses
 
 
 class CurvatureVelocityTests(unittest.TestCase):
+    def test_transport_velocity_uses_depth_decay_from_local_contour(self):
+        dtype = torch.float64
+        model = DepositionPINN(
+            {
+                "solution_hidden_dim": 4,
+                "solution_depth": 1,
+                "velocity_hidden_dim": 4,
+                "velocity_depth": 1,
+                "contour_embedding_dim": 4,
+                "velocity_residual_fraction": 0.0,
+                "use_transport_velocity": True,
+                "learn_transport_alpha": False,
+                "transport_alpha": 1.0,
+                "learn_transport_ld": False,
+                "transport_ld": 2.0,
+            }
+        ).to(dtype=dtype)
+        features = torch.zeros((2, len(FEATURE_NAMES)), dtype=dtype)
+        features[:, 1] = torch.tensor([0.0, 1.0], dtype=dtype)
+        features[:, 12] = torch.tensor([0.0, 0.0], dtype=dtype)
+        contour = torch.zeros((20, 3), dtype=dtype)
+        raw_phi0 = torch.zeros(2, dtype=dtype)
+        duration = torch.tensor(1.0, dtype=dtype)
+        average_rate = torch.tensor(2.0, dtype=dtype)
+
+        _phi, velocity = model(features, contour, raw_phi0, duration, average_rate, 32.0, length_y=10.0)
+
+        expected_depth = torch.tensor([0.0, 5.0], dtype=dtype)
+        expected = average_rate * torch.exp(-expected_depth / 2.0)
+        torch.testing.assert_close(velocity, expected)
+
+    def test_linear_curvature_velocity_exposes_regularizable_component(self):
+        dtype = torch.float64
+        model = DepositionPINN(
+            {
+                "solution_hidden_dim": 4,
+                "solution_depth": 1,
+                "velocity_hidden_dim": 4,
+                "velocity_depth": 1,
+                "contour_embedding_dim": 4,
+                "velocity_residual_fraction": 0.0,
+                "use_curvature_velocity": True,
+                "learn_curvature_velocity_weight": False,
+                "curvature_velocity_weight": 0.1,
+                "curvature_velocity_form": "linear",
+                "curvature_mcoeff": 2.0,
+            }
+        ).to(dtype=dtype)
+        features = torch.zeros((2, len(FEATURE_NAMES)), dtype=dtype)
+        features[:, 11] = torch.tensor([0.5, -0.25], dtype=dtype)
+        contour = torch.zeros((20, 3), dtype=dtype)
+        raw_phi0 = torch.zeros(2, dtype=dtype)
+        duration = torch.tensor(1.0, dtype=dtype)
+        average_rate = torch.tensor(3.0, dtype=dtype)
+
+        _phi, velocity = model(features, contour, raw_phi0, duration, average_rate, 32.0)
+        components = model.velocity_components(features, contour, average_rate)
+
+        expected_curvature = average_rate * 0.1 * 2.0 * features[:, 11]
+        torch.testing.assert_close(components["curvature"], expected_curvature)
+        torch.testing.assert_close(velocity, average_rate + expected_curvature)
+
+    def test_curvature_velocity_loss_penalizes_curvature_component(self):
+        curvature_velocity = torch.tensor([0.0, 2.0, -1.0], dtype=torch.float64)
+
+        loss = losses.curvature_velocity_loss(curvature_velocity)
+
+        torch.testing.assert_close(loss, torch.tensor(5.0 / 3.0, dtype=torch.float64))
+
     def test_curvature_velocity_adds_signed_curvature_effect(self):
         dtype = torch.float64
         model = DepositionPINN(

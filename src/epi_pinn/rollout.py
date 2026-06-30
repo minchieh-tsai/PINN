@@ -42,7 +42,7 @@ def _load_model(config: Mapping[str, Any], process_name: str, checkpoint_path: P
     model = DepositionPINN(config.get("model", {})) if process_name == "deposition" else EtchPINN(config.get("model", {}))
     checkpoint = torch.load(str(checkpoint_path), map_location=device)
     load_result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-    allowed_keys = {"raw_curvature_velocity_weight"}
+    allowed_keys = {"raw_curvature_velocity_weight", "raw_transport_alpha", "raw_transport_ld"}
     missing = [key for key in load_result.missing_keys if key not in allowed_keys]
     unexpected = [key for key in load_result.unexpected_keys if key not in allowed_keys]
     if missing or unexpected:
@@ -100,6 +100,9 @@ def predict_next_levelset(
         first_crossing_policy=str(contour_cfg.get("first_crossing_policy", "topmost")),
     )
     height, width = phi_initial.shape
+    spatial_cfg = config.get("spatial", {})
+    pixel_size_y = float(spatial_cfg.get("pixel_size_y", 1.0))
+    length_y = max(pixel_size_y, (height - 1) * pixel_size_y)
     xi, eta, _x, _y = full_grid_query(height, width)
     tau = np.ones_like(xi)
     features, raw_phi0 = build_features(
@@ -124,6 +127,7 @@ def predict_next_levelset(
         clip_distance,
         device=device,
         dtype=dtype,
+        length_y=length_y,
     )
     return np.ascontiguousarray(pred.reshape(height, width), dtype=np.float64)
 
