@@ -39,6 +39,8 @@ class LevelSetPINN(nn.Module):
         super().__init__()
         self.process_sign = float(process_sign)
         self.correction_scale = float(model_config.get("correction_scale", 0.5))
+        self.use_nominal_rate_solution = bool(model_config.get("use_nominal_rate_solution", True))
+        self.use_process_condition_features = bool(model_config.get("use_process_condition_features", True))
         self.velocity_residual_fraction = float(model_config.get("velocity_residual_fraction", 0.5))
 
         self.use_transport_velocity = bool(model_config.get("use_transport_velocity", False))
@@ -128,6 +130,13 @@ class LevelSetPINN(nn.Module):
     def _transport_ld_for(self, features: torch.Tensor) -> torch.Tensor:
         return self.transport_ld_value().to(dtype=features.dtype, device=features.device)
 
+    def _network_features(self, features: torch.Tensor) -> torch.Tensor:
+        if self.use_process_condition_features:
+            return features
+        network_features = features.clone()
+        network_features[:, 3:6] = 0.0
+        return network_features
+
     def _compose_features(self, features: torch.Tensor, contour_features: torch.Tensor) -> torch.Tensor:
         if contour_features.ndim == 2:
             contour_features = contour_features.unsqueeze(0)
@@ -136,7 +145,7 @@ class LevelSetPINN(nn.Module):
             embedding = embedding.expand(features.shape[0], -1)
         elif embedding.shape[0] != features.shape[0]:
             raise ValueError("Contour embedding batch size must be 1 or match feature batch size")
-        return torch.cat([features, embedding], dim=1)
+        return torch.cat([self._network_features(features), embedding], dim=1)
 
     def _transport_depth(self, features: torch.Tensor, length_y: Optional[float]) -> torch.Tensor:
         eta = features[:, 1]
@@ -208,7 +217,10 @@ class LevelSetPINN(nn.Module):
         tau = features[:, 2]
         g_theta = self.solution_net(composed).squeeze(-1)
 
-        nominal = raw_phi0 - tau * duration_s * self.process_sign * average_rate
+        if self.use_nominal_rate_solution:
+            nominal = raw_phi0 - tau * duration_s * self.process_sign * average_rate
+        else:
+            nominal = raw_phi0
         correction = tau * float(clip_distance) * self.correction_scale * torch.tanh(g_theta)
         if self.hard_initial_condition:
             phi = nominal + correction

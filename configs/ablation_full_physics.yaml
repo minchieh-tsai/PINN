@@ -1,6 +1,6 @@
 project:
   name: epi_levelset_pinn_poc
-  output_dir: artifacts
+  output_dir: artifacts/ablation_full_physics
 
 data:
   expected_height: 350
@@ -87,6 +87,7 @@ model:
   velocity_depth: 4
   contour_embedding_dim: 64
   use_nominal_rate_solution: true
+  use_process_condition_features: true
   hard_initial_condition: true
   correction_scale: 0.20
   velocity_residual_fraction: 0.20

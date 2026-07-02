@@ -44,6 +44,9 @@ from epi_pinn.sampling import (
 from epi_pinn.sdf import ensure_signed_distance
 
 
+LossRow = Tuple[int, str, float, float, float, float, float, float, float, float, float, float, float]
+
+
 def torch_dtype(name: str) -> torch.dtype:
     return torch.float64 if str(name).lower() == "float64" else torch.float32
 
@@ -161,6 +164,162 @@ def _prepare_transitions(
     return prepared
 
 
+def _sample_training_batch(
+    item: Mapping[str, Any],
+    batch_size: int,
+    endpoint_fraction: float,
+    collocation_batch_size: int,
+    collocation_interface_fraction: float,
+    collocation_contour_fraction: float,
+    collocation_global_fraction: float,
+    use_physics_terms: bool,
+    rng: np.random.Generator,
+) -> Dict[str, np.ndarray]:
+    batch = {
+        "endpoint_indices": sample_endpoint_indices(
+            item["phi_target"],
+            batch_size,
+            endpoint_fraction,
+            item["narrow_band"],
+            rng,
+        )
+    }
+    if use_physics_terms:
+        collocation_indices, collocation_tau = sample_collocation_indices(
+            item["collocation_pools"],
+            collocation_batch_size,
+            collocation_interface_fraction,
+            collocation_contour_fraction,
+            collocation_global_fraction,
+            rng,
+        )
+        batch["collocation_indices"] = collocation_indices
+        batch["collocation_tau"] = collocation_tau
+    return batch
+
+
+def _compute_training_losses(
+    model: torch.nn.Module,
+    item: Mapping[str, Any],
+    batch: Mapping[str, np.ndarray],
+    dtype: torch.dtype,
+    device: str,
+    loss_weights: Mapping[str, float],
+    use_physics_terms: bool,
+) -> Dict[str, torch.Tensor]:
+    endpoint_indices = batch["endpoint_indices"]
+    features = torch.as_tensor(item["features"][endpoint_indices], dtype=dtype, device=device)
+    raw_phi0 = torch.as_tensor(item["raw_phi0"][endpoint_indices], dtype=dtype, device=device)
+    phi_target = torch.as_tensor(item["phi_target"][endpoint_indices], dtype=dtype, device=device)
+    contour = torch.as_tensor(item["contour"], dtype=dtype, device=device)
+    duration = torch.tensor(float(item["duration_s"]), dtype=dtype, device=device)
+    rate = torch.tensor(float(item["average_rate"]), dtype=dtype, device=device)
+
+    phi_pred, _velocity = model(features, contour, raw_phi0, duration, rate, item["clip_distance"])
+    sdf = endpoint_sdf_loss(phi_pred, phi_target)
+    dice = dice_loss(phi_pred, phi_target)
+    zero = torch.zeros((), dtype=dtype, device=device)
+    pde = zero
+    eikonal = zero
+    sign = zero
+    velocity_jacobian = zero
+    curvature_velocity = zero
+    loss = loss_weights["sdf"] * sdf + loss_weights["dice"] * dice
+
+    if use_physics_terms:
+        collocation_indices = batch["collocation_indices"]
+        collocation_tau = batch["collocation_tau"]
+        collocation_features_np = item["features"][collocation_indices].copy()
+        collocation_features_np[:, 2] = collocation_tau
+        collocation_features = torch.as_tensor(collocation_features_np, dtype=dtype, device=device).requires_grad_(True)
+        collocation_raw_phi0 = torch.as_tensor(item["raw_phi0"][collocation_indices], dtype=dtype, device=device)
+        collocation_phi, collocation_velocity = model(
+            collocation_features,
+            contour,
+            collocation_raw_phi0,
+            duration,
+            rate,
+            item["clip_distance"],
+            length_y=item["length_y"],
+        )
+        phi_x, phi_y, phi_t = levelset_derivatives(
+            collocation_phi,
+            collocation_features,
+            duration,
+            item["length_x"],
+            item["length_y"],
+        )
+        pde = pde_residual_loss(phi_x, phi_y, phi_t, collocation_velocity)
+        eikonal = eikonal_loss(phi_x, phi_y)
+        sign = sign_loss(phi_t, float(item["process_sign"]))
+        if loss_weights["velocity_jacobian"] > 0.0:
+            velocity_jacobian = velocity_jacobian_loss(
+                collocation_velocity,
+                collocation_features,
+                item["length_x"],
+                item["length_y"],
+            )
+        if loss_weights["curvature_velocity"] > 0.0:
+            velocity_components = model.velocity_components(
+                collocation_features,
+                contour,
+                rate,
+                length_y=item["length_y"],
+            )
+            curvature_velocity = curvature_velocity_loss(velocity_components["curvature"])
+        loss = (
+            loss
+            + loss_weights["pde"] * pde
+            + loss_weights["eikonal"] * eikonal
+            + loss_weights["sign"] * sign
+            + loss_weights["velocity_jacobian"] * velocity_jacobian
+            + loss_weights["curvature_velocity"] * curvature_velocity
+        )
+
+    return {
+        "loss": loss,
+        "sdf": sdf,
+        "dice": dice,
+        "pde": pde,
+        "eikonal": eikonal,
+        "sign": sign,
+        "velocity_jacobian": velocity_jacobian,
+        "curvature_velocity": curvature_velocity,
+    }
+
+
+def _append_log_row(rows: List[LossRow], step: int, item: Mapping[str, Any], losses: Mapping[str, torch.Tensor], model: torch.nn.Module) -> None:
+    rows.append(
+        (
+            step,
+            str(item["id"]),
+            float(losses["loss"].detach().cpu()),
+            float(losses["sdf"].detach().cpu()),
+            float(losses["dice"].detach().cpu()),
+            float(losses["pde"].detach().cpu()),
+            float(losses["eikonal"].detach().cpu()),
+            float(losses["sign"].detach().cpu()),
+            float(losses["velocity_jacobian"].detach().cpu()),
+            float(losses["curvature_velocity"].detach().cpu()),
+            current_beta_kappa(model),
+            current_transport_alpha(model),
+            current_transport_ld(model),
+        )
+    )
+
+
+def _save_checkpoint(model: torch.nn.Module, path: Path, process_name: str, best_loss: float, config: Mapping[str, Any]) -> None:
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "process_name": process_name,
+            "best_loss": best_loss,
+            "config": config,
+        },
+        path,
+    )
+
+
 def train_process(config_path: str, process_name: str, infer_missing_rates: bool = False) -> Path:
     config = load_config(config_path)
     root = project_root_from_config_path(config_path)
@@ -187,19 +346,21 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     collocation_contour_fraction = float(sampling_cfg.get("collocation_contour_fraction", 0.20))
     collocation_global_fraction = float(sampling_cfg.get("collocation_global_fraction", 0.20))
 
-    lambda_sdf = float(loss_cfg.get("sdf", 1.0))
-    lambda_dice = float(loss_cfg.get("dice", 0.5))
-    lambda_pde = float(loss_cfg.get("pde", 1.0))
-    lambda_eikonal = float(loss_cfg.get("eikonal", 0.02))
-    lambda_sign = float(loss_cfg.get("sign", 0.05))
-    lambda_velocity_jacobian = float(loss_cfg.get("velocity_jacobian", 0.0))
-    lambda_curvature_velocity = float(loss_cfg.get("curvature_velocity", 0.0))
+    loss_weights = {
+        "sdf": float(loss_cfg.get("sdf", 1.0)),
+        "dice": float(loss_cfg.get("dice", 0.5)),
+        "pde": float(loss_cfg.get("pde", 1.0)),
+        "eikonal": float(loss_cfg.get("eikonal", 0.02)),
+        "sign": float(loss_cfg.get("sign", 0.05)),
+        "velocity_jacobian": float(loss_cfg.get("velocity_jacobian", 0.0)),
+        "curvature_velocity": float(loss_cfg.get("curvature_velocity", 0.0)),
+    }
     use_physics_terms = collocation_batch_size > 0 and (
-        lambda_pde > 0.0
-        or lambda_eikonal > 0.0
-        or lambda_sign > 0.0
-        or lambda_velocity_jacobian > 0.0
-        or lambda_curvature_velocity > 0.0
+        loss_weights["pde"] > 0.0
+        or loss_weights["eikonal"] > 0.0
+        or loss_weights["sign"] > 0.0
+        or loss_weights["velocity_jacobian"] > 0.0
+        or loss_weights["curvature_velocity"] > 0.0
     )
 
     out_dir = output_dir(config, root)
@@ -211,135 +372,92 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     best_path = checkpoint_dir / f"{process_name}_best.pt"
 
     best_loss = float("inf")
-    rows: List[Tuple[int, str, float, float, float, float, float, float, float, float, float, float, float]] = []
+    rows: List[LossRow] = []
     for step in range(1, steps + 1):
         item = prepared[(step - 1) % len(prepared)]
-        endpoint_indices = sample_endpoint_indices(
-            item["phi_target"],
+        batch = _sample_training_batch(
+            item,
             batch_size,
             endpoint_fraction,
-            item["narrow_band"],
+            collocation_batch_size,
+            collocation_interface_fraction,
+            collocation_contour_fraction,
+            collocation_global_fraction,
+            use_physics_terms,
             rng,
         )
-        features = torch.as_tensor(item["features"][endpoint_indices], dtype=dtype, device=device)
-        raw_phi0 = torch.as_tensor(item["raw_phi0"][endpoint_indices], dtype=dtype, device=device)
-        phi_target = torch.as_tensor(item["phi_target"][endpoint_indices], dtype=dtype, device=device)
-        contour = torch.as_tensor(item["contour"], dtype=dtype, device=device)
-        duration = torch.tensor(float(item["duration_s"]), dtype=dtype, device=device)
-        rate = torch.tensor(float(item["average_rate"]), dtype=dtype, device=device)
-
         optimizer.zero_grad(set_to_none=True)
-        phi_pred, _velocity = model(features, contour, raw_phi0, duration, rate, item["clip_distance"])
-        sdf = endpoint_sdf_loss(phi_pred, phi_target)
-        dice = dice_loss(phi_pred, phi_target)
-        zero = torch.zeros((), dtype=dtype, device=device)
-        pde = zero
-        eikonal = zero
-        sign = zero
-        velocity_jacobian = zero
-        curvature_velocity = zero
-        loss = lambda_sdf * sdf + lambda_dice * dice
-
-        if use_physics_terms:
-            collocation_indices, collocation_tau = sample_collocation_indices(
-                item["collocation_pools"],
-                collocation_batch_size,
-                collocation_interface_fraction,
-                collocation_contour_fraction,
-                collocation_global_fraction,
-                rng,
-            )
-            collocation_features_np = item["features"][collocation_indices].copy()
-            collocation_features_np[:, 2] = collocation_tau
-            collocation_features = torch.as_tensor(collocation_features_np, dtype=dtype, device=device).requires_grad_(True)
-            collocation_raw_phi0 = torch.as_tensor(item["raw_phi0"][collocation_indices], dtype=dtype, device=device)
-            collocation_phi, collocation_velocity = model(
-                collocation_features,
-                contour,
-                collocation_raw_phi0,
-                duration,
-                rate,
-                item["clip_distance"],
-                length_y=item["length_y"],
-            )
-            phi_x, phi_y, phi_t = levelset_derivatives(
-                collocation_phi,
-                collocation_features,
-                duration,
-                item["length_x"],
-                item["length_y"],
-            )
-            pde = pde_residual_loss(phi_x, phi_y, phi_t, collocation_velocity)
-            eikonal = eikonal_loss(phi_x, phi_y)
-            sign = sign_loss(phi_t, float(item["process_sign"]))
-            if lambda_velocity_jacobian > 0.0:
-                velocity_jacobian = velocity_jacobian_loss(
-                    collocation_velocity,
-                    collocation_features,
-                    item["length_x"],
-                    item["length_y"],
-                )
-            if lambda_curvature_velocity > 0.0:
-                velocity_components = model.velocity_components(
-                    collocation_features,
-                    contour,
-                    rate,
-                    length_y=item["length_y"],
-                )
-                curvature_velocity = curvature_velocity_loss(velocity_components["curvature"])
-            loss = (
-                loss
-                + lambda_pde * pde
-                + lambda_eikonal * eikonal
-                + lambda_sign * sign
-                + lambda_velocity_jacobian * velocity_jacobian
-                + lambda_curvature_velocity * curvature_velocity
-            )
-
-        loss.backward()
+        losses = _compute_training_losses(model, item, batch, dtype, device, loss_weights, use_physics_terms)
+        losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
-        loss_value = float(loss.detach().cpu())
-        beta_kappa = current_beta_kappa(model)
-        transport_alpha = current_transport_alpha(model)
-        transport_ld = current_transport_ld(model)
+        loss_value = float(losses["loss"].detach().cpu())
         if step % log_every == 0 or step == 1:
-            rows.append(
-                (
-                    step,
-                    str(item["id"]),
-                    loss_value,
-                    float(sdf.detach().cpu()),
-                    float(dice.detach().cpu()),
-                    float(pde.detach().cpu()),
-                    float(eikonal.detach().cpu()),
-                    float(sign.detach().cpu()),
-                    float(velocity_jacobian.detach().cpu()),
-                    float(curvature_velocity.detach().cpu()),
-                    beta_kappa,
-                    transport_alpha,
-                    transport_ld,
-                )
-            )
+            _append_log_row(rows, step, item, losses, model)
             print(
                 f"[{process_name}] step={step}/{steps} transition={item['id']} "
-                f"loss={loss_value:.6g} beta_kappa={beta_kappa:.6g} "
-                f"alpha_transport={transport_alpha:.6g} Ld={transport_ld:.6g}",
+                f"loss={loss_value:.6g} beta_kappa={current_beta_kappa(model):.6g} "
+                f"alpha_transport={current_transport_alpha(model):.6g} Ld={current_transport_ld(model):.6g}",
                 flush=True,
             )
         if loss_value < best_loss or step % checkpoint_every == 0:
             if loss_value < best_loss:
                 best_loss = loss_value
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "process_name": process_name,
-                    "best_loss": best_loss,
-                    "config": config,
-                },
-                best_path,
+            _save_checkpoint(model, best_path, process_name, best_loss, config)
+
+    use_lbfgs = bool(training_cfg.get("use_lbfgs", False))
+    lbfgs_steps = int(training_cfg.get("lbfgs_steps", 0))
+    if use_lbfgs and lbfgs_steps > 0:
+        lbfgs = torch.optim.LBFGS(
+            model.parameters(),
+            lr=float(training_cfg.get("lbfgs_lr", 1.0)),
+            max_iter=int(training_cfg.get("lbfgs_max_iter", 20)),
+            history_size=int(training_cfg.get("lbfgs_history_size", 50)),
+            line_search_fn=str(training_cfg.get("lbfgs_line_search_fn", "strong_wolfe")),
+        )
+        for lbfgs_step in range(1, lbfgs_steps + 1):
+            global_step = steps + lbfgs_step
+            item = prepared[(global_step - 1) % len(prepared)]
+            batch = _sample_training_batch(
+                item,
+                batch_size,
+                endpoint_fraction,
+                collocation_batch_size,
+                collocation_interface_fraction,
+                collocation_contour_fraction,
+                collocation_global_fraction,
+                use_physics_terms,
+                rng,
             )
+            latest_losses: Dict[str, torch.Tensor] = {}
+
+            def closure() -> torch.Tensor:
+                lbfgs.zero_grad(set_to_none=True)
+                losses = _compute_training_losses(model, item, batch, dtype, device, loss_weights, use_physics_terms)
+                losses["loss"].backward()
+                if grad_clip > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                latest_losses.clear()
+                latest_losses.update(losses)
+                return losses["loss"]
+
+            lbfgs.step(closure)
+            losses = latest_losses
+            loss_value = float(losses["loss"].detach().cpu())
+            if global_step % log_every == 0 or lbfgs_step == 1:
+                _append_log_row(rows, global_step, item, losses, model)
+                print(
+                    f"[{process_name}] lbfgs_step={lbfgs_step}/{lbfgs_steps} global_step={global_step} "
+                    f"transition={item['id']} loss={loss_value:.6g} "
+                    f"beta_kappa={current_beta_kappa(model):.6g} "
+                    f"alpha_transport={current_transport_alpha(model):.6g} Ld={current_transport_ld(model):.6g}",
+                    flush=True,
+                )
+            if loss_value < best_loss or global_step % checkpoint_every == 0:
+                if loss_value < best_loss:
+                    best_loss = loss_value
+                _save_checkpoint(model, best_path, process_name, best_loss, config)
 
     with log_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
