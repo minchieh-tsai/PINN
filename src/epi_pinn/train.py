@@ -26,6 +26,7 @@ from epi_pinn.losses import (
     curvature_velocity_loss,
     dice_loss,
     eikonal_loss,
+    endpoint_mae_loss,
     endpoint_sdf_loss,
     levelset_derivatives,
     pde_residual_loss,
@@ -44,7 +45,7 @@ from epi_pinn.sampling import (
 from epi_pinn.sdf import ensure_signed_distance
 
 
-LossRow = Tuple[int, str, float, float, float, float, float, float, float, float, float, float, float]
+LossRow = Tuple[int, str, float, float, float, float, float, float, float, float, float, float, float, float]
 
 
 def torch_dtype(name: str) -> torch.dtype:
@@ -218,13 +219,14 @@ def _compute_training_losses(
     phi_pred, _velocity = model(features, contour, raw_phi0, duration, rate, item["clip_distance"])
     sdf = endpoint_sdf_loss(phi_pred, phi_target)
     dice = dice_loss(phi_pred, phi_target)
+    mae = endpoint_mae_loss(phi_pred, phi_target)
     zero = torch.zeros((), dtype=dtype, device=device)
     pde = zero
     eikonal = zero
     sign = zero
     velocity_jacobian = zero
     curvature_velocity = zero
-    loss = loss_weights["sdf"] * sdf + loss_weights["dice"] * dice
+    loss = loss_weights["sdf"] * sdf + loss_weights["dice"] * dice + loss_weights["mae"] * mae
 
     if use_physics_terms:
         collocation_indices = batch["collocation_indices"]
@@ -280,6 +282,7 @@ def _compute_training_losses(
         "loss": loss,
         "sdf": sdf,
         "dice": dice,
+        "mae": mae,
         "pde": pde,
         "eikonal": eikonal,
         "sign": sign,
@@ -296,6 +299,7 @@ def _append_log_row(rows: List[LossRow], step: int, item: Mapping[str, Any], los
             float(losses["loss"].detach().cpu()),
             float(losses["sdf"].detach().cpu()),
             float(losses["dice"].detach().cpu()),
+            float(losses["mae"].detach().cpu()),
             float(losses["pde"].detach().cpu()),
             float(losses["eikonal"].detach().cpu()),
             float(losses["sign"].detach().cpu()),
@@ -349,6 +353,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     loss_weights = {
         "sdf": float(loss_cfg.get("sdf", 1.0)),
         "dice": float(loss_cfg.get("dice", 0.5)),
+        "mae": float(loss_cfg.get("mae", 0.0)),
         "pde": float(loss_cfg.get("pde", 1.0)),
         "eikonal": float(loss_cfg.get("eikonal", 0.02)),
         "sign": float(loss_cfg.get("sign", 0.05)),
@@ -468,6 +473,7 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                 "loss",
                 "sdf_loss",
                 "dice_loss",
+                "mae_loss",
                 "pde_loss",
                 "eikonal_loss",
                 "sign_loss",

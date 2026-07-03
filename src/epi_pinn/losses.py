@@ -13,6 +13,11 @@ def endpoint_sdf_loss(phi_pred: torch.Tensor, phi_target: torch.Tensor, alpha: f
     return torch.mean(weights * F.smooth_l1_loss(phi_pred, phi_target, reduction="none"))
 
 
+def endpoint_mae_loss(phi_pred: torch.Tensor, phi_target: torch.Tensor, alpha: float = 2.0, sigma: float = 8.0) -> torch.Tensor:
+    weights = 1.0 + alpha * torch.exp(-torch.abs(phi_target) / sigma)
+    return torch.mean(weights * torch.abs(phi_pred - phi_target))
+
+
 def soft_mask(phi: torch.Tensor, epsilon_h: float = 1.0) -> torch.Tensor:
     return torch.sigmoid(-phi / epsilon_h)
 

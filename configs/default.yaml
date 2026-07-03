@@ -111,6 +111,7 @@ model:
 loss:
   sdf: 1.0
   dice: 1.0
+  mae: 0.5
   pde: 0.2
   eikonal: 0.10
   average_rate: 0.5

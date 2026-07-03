@@ -20,6 +20,7 @@ class LossComponent:
 
 LOSS_COMPONENTS = (
     LossComponent("sdf", "sdf_loss", "sdf", "SDF"),
+    LossComponent("mae", "mae_loss", "mae", "MAE"),
     LossComponent("dice", "dice_loss", "dice", "Dice"),
     LossComponent("pde", "pde_loss", "pde", "PDE"),
     LossComponent("eikonal", "eikonal_loss", "eikonal", "Eikonal"),
@@ -31,6 +32,7 @@ LOSS_COMPONENTS = (
 
 LOSS_COLORS = {
     "sdf": "#3b82f6",
+    "mae": "#f97316",
     "dice": "#10b981",
     "pde": "#ef4444",
     "eikonal": "#8b5cf6",
