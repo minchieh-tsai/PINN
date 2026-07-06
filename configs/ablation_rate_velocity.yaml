@@ -149,6 +149,7 @@ training:
 rollout:
   start_state: 2E
   save_intermediate: true
+  reinitialize_sdf_each_step: true
 
 evaluation:
   holdout_deposition_state: 5M
