@@ -66,5 +66,34 @@ class EvaluateContourMetricTests(unittest.TestCase):
         self.assertNotEqual(metrics["zero_contour_symmetric_chamfer_px"], metrics["contour20_symmetric_chamfer_px"])
 
 
+    def test_curvature_metrics_distinguish_straight_and_oscillating_contours(self):
+        x = np.linspace(0.0, 40.0, 161)
+        straight = np.stack([np.zeros_like(x), x], axis=1)
+        oscillating = np.stack([2.0 * np.sin(1.2 * x), x], axis=1)
+
+        straight_metrics = evaluate._contour_curvature_statistics([straight])
+        oscillating_metrics = evaluate._contour_curvature_statistics([oscillating])
+
+        self.assertAlmostEqual(straight_metrics["curvature_rms"], 0.0)
+        self.assertAlmostEqual(straight_metrics["curvature_total_variation"], 0.0)
+        self.assertGreater(oscillating_metrics["curvature_rms"], straight_metrics["curvature_rms"])
+        self.assertGreater(
+            oscillating_metrics["curvature_total_variation"],
+            straight_metrics["curvature_total_variation"],
+        )
+
+    def test_contour_metrics_report_roughness_and_component_counts(self):
+        y = np.arange(9, dtype=np.float64).reshape(9, 1)
+        pred = np.repeat(y - 4.0, 9, axis=1)
+        target = np.repeat(y - 5.0, 9, axis=1)
+
+        metrics = evaluate._contour_metrics(pred, target, {"num_points": 5, "min_valid_points": 1})
+
+        self.assertIn("contour_curvature_rms", metrics)
+        self.assertIn("curvature_total_variation", metrics)
+        self.assertEqual(metrics["zero_contour_component_count"], 1.0)
+        self.assertEqual(metrics["target_zero_contour_component_count"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

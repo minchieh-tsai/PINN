@@ -58,6 +58,76 @@ def _zero_contour_points(phi: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(np.concatenate(point_sets, axis=0), dtype=np.float64)
 
 
+def _contour_curvature_statistics(contours: list) -> Dict[str, float]:
+    """Measure geometric roughness directly on marching-squares contours."""
+
+    weighted_kappa_sq = 0.0
+    total_arc_length = 0.0
+    curvature_total_variation = 0.0
+
+    for contour in contours:
+        points = np.asarray(contour, dtype=np.float64)
+        points = points[np.isfinite(points).all(axis=1)]
+        if points.shape[0] < 3:
+            continue
+
+        consecutive = np.linalg.norm(np.diff(points, axis=0), axis=1)
+        keep = np.concatenate([[True], consecutive > 1.0e-8])
+        points = points[keep]
+        if points.shape[0] < 3:
+            continue
+
+        closed = bool(np.linalg.norm(points[0] - points[-1]) <= 1.0e-6)
+        if closed:
+            points = points[:-1]
+            if points.shape[0] < 3:
+                continue
+            segments = np.roll(points, -1, axis=0) - points
+        else:
+            segments = np.diff(points, axis=0)
+
+        segment_lengths = np.linalg.norm(segments, axis=1)
+        valid_segments = segment_lengths > 1.0e-8
+        segments = segments[valid_segments]
+        segment_lengths = segment_lengths[valid_segments]
+        if segments.shape[0] < 2:
+            continue
+
+        tangents = segments / segment_lengths[:, None]
+        if closed and tangents.shape[0] >= 3:
+            next_tangents = np.roll(tangents, -1, axis=0)
+            next_lengths = np.roll(segment_lengths, -1)
+        else:
+            next_tangents = tangents[1:]
+            tangents = tangents[:-1]
+            next_lengths = segment_lengths[1:]
+            segment_lengths = segment_lengths[:-1]
+
+        cross = tangents[:, 0] * next_tangents[:, 1] - tangents[:, 1] * next_tangents[:, 0]
+        dot = np.sum(tangents * next_tangents, axis=1)
+        turning_angle = np.arctan2(cross, np.clip(dot, -1.0, 1.0))
+        local_arc = 0.5 * (segment_lengths + next_lengths)
+        kappa = turning_angle / np.maximum(local_arc, 1.0e-8)
+
+        weighted_kappa_sq += float(np.sum(kappa * kappa * local_arc))
+        total_arc_length += float(np.sum(local_arc))
+        if kappa.size >= 2:
+            if closed:
+                curvature_total_variation += float(np.sum(np.abs(np.roll(kappa, -1) - kappa)))
+            else:
+                curvature_total_variation += float(np.sum(np.abs(np.diff(kappa))))
+
+    curvature_rms = (
+        float(np.sqrt(weighted_kappa_sq / total_arc_length))
+        if total_arc_length > 0.0
+        else float("nan")
+    )
+    return {
+        "curvature_rms": curvature_rms,
+        "curvature_total_variation": curvature_total_variation if total_arc_length > 0.0 else float("nan"),
+    }
+
+
 def _mean_min_distance(points_a: np.ndarray, points_b: np.ndarray, chunk_size: int = 4096) -> float:
     minima = []
     for start in range(0, points_a.shape[0], chunk_size):
@@ -104,10 +174,20 @@ def _contour_metrics(phi_pred: np.ndarray, phi_target: np.ndarray, contour_confi
     true_contour20_points = _contour_pixels(target_contour, height, width)[target_contour.valid_mask > 0.0]
     pred_zero_points = _zero_contour_points(phi_pred)
     true_zero_points = _zero_contour_points(phi_target)
+    pred_zero_contours = _find_zero_contours(phi_pred)
+    true_zero_contours = _find_zero_contours(phi_target)
+    pred_roughness = _contour_curvature_statistics(pred_zero_contours)
+    true_roughness = _contour_curvature_statistics(true_zero_contours)
     return {
         "contour20_y_mae_px": y_mae,
         "contour20_symmetric_chamfer_px": _symmetric_chamfer(pred_contour20_points, true_contour20_points),
         "zero_contour_symmetric_chamfer_px": _symmetric_chamfer(pred_zero_points, true_zero_points),
+        "contour_curvature_rms": pred_roughness["curvature_rms"],
+        "target_contour_curvature_rms": true_roughness["curvature_rms"],
+        "curvature_total_variation": pred_roughness["curvature_total_variation"],
+        "target_curvature_total_variation": true_roughness["curvature_total_variation"],
+        "zero_contour_component_count": float(len(pred_zero_contours)),
+        "target_zero_contour_component_count": float(len(true_zero_contours)),
     }
 
 

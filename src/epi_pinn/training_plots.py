@@ -27,6 +27,8 @@ LOSS_COMPONENTS = (
     LossComponent("sign", "sign_loss", "sign", "Sign"),
     LossComponent("velocity_jacobian", "velocity_jacobian_loss", "velocity_jacobian", "Velocity Jacobian"),
     LossComponent("curvature_velocity", "curvature_velocity_loss", "curvature_velocity", "Curvature Velocity"),
+    LossComponent("normal_consistency", "normal_consistency_loss", "normal_consistency", "Normal Consistency"),
+    LossComponent("velocity_smoothness", "velocity_smoothness_loss", "velocity_smoothness", "Velocity Smoothness"),
 )
 
 
@@ -39,6 +41,8 @@ LOSS_COLORS = {
     "sign": "#f59e0b",
     "velocity_jacobian": "#14b8a6",
     "curvature_velocity": "#ec4899",
+    "normal_consistency": "#6366f1",
+    "velocity_smoothness": "#84cc16",
 }
 
 

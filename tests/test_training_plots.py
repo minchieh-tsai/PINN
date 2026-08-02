@@ -59,6 +59,22 @@ class TrainingPlotTests(unittest.TestCase):
         self.assertAlmostEqual(fractions.loc[0, "dice"], 0.75)
         self.assertAlmostEqual(fractions.loc[1].sum(), 0.0)
 
+    def test_smoothness_components_are_available_for_weighted_plots(self):
+        frame = pd.DataFrame(
+            {
+                "normal_consistency_loss": [0.4],
+                "velocity_smoothness_loss": [0.5],
+            }
+        )
+
+        weighted = training_plots.weighted_loss_components(
+            frame,
+            {"normal_consistency": 0.1, "velocity_smoothness": 0.01},
+        )
+
+        self.assertAlmostEqual(weighted.loc[0, "normal_consistency"], 0.04)
+        self.assertAlmostEqual(weighted.loc[0, "velocity_smoothness"], 0.005)
+
 
 if __name__ == "__main__":
     unittest.main()

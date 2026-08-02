@@ -44,7 +44,15 @@ def main() -> int:
     )
     parser.add_argument("--min-contour-points", type=int, default=25)
     parser.add_argument("--border-margin", type=float, default=2.0)
+    parser.add_argument(
+        "--display-spline-smoothing-px",
+        type=float,
+        default=0.0,
+        help="Display-only B-spline smoothing in pixels; does not alter arrays or metrics",
+    )
     args = parser.parse_args()
+    if args.display_spline_smoothing_px < 0.0:
+        parser.error("--display-spline-smoothing-px must be non-negative")
 
     root = add_src_path()
     from epi_pinn.config import load_config, output_dir, project_root_from_config_path
@@ -79,6 +87,7 @@ def main() -> int:
         contour_mode=args.contour_mode,
         min_contour_points=args.min_contour_points,
         border_margin=args.border_margin,
+        display_spline_smoothing_px=args.display_spline_smoothing_px,
     )
     print(f"Saved figure: {output}")
     return 0

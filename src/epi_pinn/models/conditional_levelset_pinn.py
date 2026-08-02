@@ -93,6 +93,9 @@ class LevelSetPINN(nn.Module):
         self.curvature_velocity_sign = float(model_config.get("curvature_velocity_sign", 1.0))
         self.curvature_reference = float(model_config.get("curvature_reference", 0.1))
         self.curvature_velocity_form = str(model_config.get("curvature_velocity_form", "tanh")).lower()
+        self.curvature_velocity_mode = str(model_config.get("curvature_velocity_mode", "legacy")).lower()
+        if self.curvature_velocity_mode not in {"legacy", "smoothing"}:
+            raise ValueError("curvature_velocity_mode must be 'legacy' or 'smoothing'")
         self.curvature_mcoeff = float(model_config.get("curvature_mcoeff", 1.0))
         self.hard_initial_condition = bool(model_config.get("hard_initial_condition", True))
         embedding_dim = int(model_config.get("contour_embedding_dim", 64))
@@ -183,13 +186,20 @@ class LevelSetPINN(nn.Module):
             else:
                 curvature_reference = max(self.curvature_reference, 1.0e-12)
                 curvature_effect = self.curvature_mcoeff * torch.tanh(kappa0 / curvature_reference)
-            curvature = (
-                self.curvature_velocity_sign
-                * self.process_sign
-                * average_rate
-                * self._curvature_velocity_weight_for(features)
-                * curvature_effect
-            )
+            if self.curvature_velocity_mode == "smoothing":
+                curvature = (
+                    -torch.abs(base)
+                    * self._curvature_velocity_weight_for(features)
+                    * curvature_effect
+                )
+            else:
+                curvature = (
+                    self.curvature_velocity_sign
+                    * self.process_sign
+                    * average_rate
+                    * self._curvature_velocity_weight_for(features)
+                    * curvature_effect
+                )
         total = base + transport + curvature
         return {"base": base, "transport": transport, "curvature": curvature, "total": total}
 

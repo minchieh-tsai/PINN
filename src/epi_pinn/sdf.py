@@ -18,6 +18,16 @@ def rebuild_sdf_from_mask(mask_inside: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(distance_outside - distance_inside, dtype=np.float64)
 
 
+def smooth_and_rebuild_sdf(phi: np.ndarray, sigma_px: float) -> np.ndarray:
+    """Gaussian-smooth a level set before rebuilding a clean signed distance field."""
+
+    sigma = float(sigma_px)
+    if sigma < 0.0:
+        raise ValueError("sigma_px must be non-negative")
+    array = np.asarray(phi, dtype=np.float64)
+    smoothed = ndimage.gaussian_filter(array, sigma=sigma) if sigma > 0.0 else array
+    return rebuild_sdf_from_mask(smoothed < 0.0)
+
 def ensure_signed_distance(phi: np.ndarray, level_set_config: Mapping[str, object]) -> np.ndarray:
     input_kind = str(level_set_config.get("input_kind", "signed_distance"))
     rebuild = bool(level_set_config.get("rebuild_sdf", False))

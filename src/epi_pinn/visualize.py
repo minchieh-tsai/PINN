@@ -120,6 +120,35 @@ def _select_contours_for_plot(
     raise ValueError(f"Unsupported contour_mode: {mode!r}; expected main, filtered, or all")
 
 
+def _smooth_contour_for_display(contour: np.ndarray, smoothing_px: float) -> np.ndarray:
+    """Return a display-only parametric B-spline without changing model output."""
+
+    points = np.asarray(contour, dtype=np.float64)
+    if smoothing_px <= 0.0 or points.shape[0] < 4:
+        return points
+
+    consecutive = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    points = points[np.concatenate([[True], consecutive > 1.0e-8])]
+    if points.shape[0] < 4:
+        return points
+
+    from scipy.interpolate import splprep, splev
+
+    closed = bool(np.linalg.norm(points[0] - points[-1]) <= 2.0)
+    try:
+        spline, _parameter = splprep(
+            [points[:, 0], points[:, 1]],
+            s=float(smoothing_px) ** 2 * points.shape[0],
+            per=closed,
+            k=min(3, points.shape[0] - 1),
+        )
+        sample_count = max(points.shape[0], 200)
+        sampled = splev(np.linspace(0.0, 1.0, sample_count), spline)
+    except (TypeError, ValueError):
+        return points
+    return np.stack(sampled, axis=1)
+
+
 def _plot_zero_contours(
     axis,
     phi: np.ndarray,
@@ -129,10 +158,20 @@ def _plot_zero_contours(
     mode: str,
     min_points: int,
     border_margin: float,
+    display_spline_smoothing_px: float = 0.0,
 ) -> bool:
+    if display_spline_smoothing_px < 0.0:
+        raise ValueError("display_spline_smoothing_px must be non-negative")
     contours = _select_contours_for_plot(phi, mode, min_points, border_margin)
     for contour in contours:
-        axis.plot(contour[:, 1], contour[:, 0], color=color, linewidth=linewidth, linestyle=linestyle)
+        display_contour = _smooth_contour_for_display(contour, display_spline_smoothing_px)
+        axis.plot(
+            display_contour[:, 1],
+            display_contour[:, 0],
+            color=color,
+            linewidth=linewidth,
+            linestyle=linestyle,
+        )
     return bool(contours)
 
 
@@ -145,13 +184,16 @@ def save_zero_contour_grid(
     contour_mode: str = "main",
     min_contour_points: int = 25,
     border_margin: float = 2.0,
+    display_spline_smoothing_px: float = 0.0,
 ) -> None:
     """Save one large figure showing predicted phi=0 contours for each state.
 
     By default only the selected main contour is drawn.  This avoids rendering
     background frame contours, small closed holes, and isolated zero-level
     islands that make the plot hard to read.  Use contour_mode="filtered" or
-    contour_mode="all" when debugging every zero-level component.
+    contour_mode="all" when debugging every zero-level component.  Positive
+    display_spline_smoothing_px affects rendered lines only, never metrics or
+    saved level-set arrays.
     """
 
     import math
@@ -191,6 +233,7 @@ def save_zero_contour_grid(
             mode=contour_mode,
             min_points=min_contour_points,
             border_margin=border_margin,
+            display_spline_smoothing_px=display_spline_smoothing_px,
         )
         gt_drawn = False
         if state in gt_arrays:
@@ -203,6 +246,7 @@ def save_zero_contour_grid(
                 mode=contour_mode,
                 min_points=min_contour_points,
                 border_margin=border_margin,
+                display_spline_smoothing_px=display_spline_smoothing_px,
             )
         axis.set_title(state)
         axis.set_xlabel("x pixel")

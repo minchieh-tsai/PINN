@@ -144,6 +144,34 @@ def sample_endpoint_indices(
     return np.concatenate(chosen).astype(np.int64)
 
 
+def sample_neighbor_stencils(
+    phi_target: np.ndarray,
+    batch_size: int,
+    narrow_band_distance: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Sample center/left/right/up/down stencils inside the target narrow band."""
+
+    target = np.asarray(phi_target, dtype=np.float64)
+    if target.ndim != 2:
+        raise ValueError("phi_target must be a 2D array")
+    height, width = target.shape
+    if height < 3 or width < 3:
+        raise ValueError("phi_target must be at least 3x3 for neighbor stencils")
+    if batch_size <= 0:
+        return np.empty((0, 5), dtype=np.int64)
+
+    interior = np.zeros(target.shape, dtype=bool)
+    interior[1:-1, 1:-1] = True
+    pool = np.flatnonzero(interior & (np.abs(target) <= float(narrow_band_distance)))
+    if pool.size == 0:
+        pool = np.flatnonzero(interior)
+    centers = rng.choice(pool, size=batch_size, replace=pool.size < batch_size).astype(np.int64)
+    return np.stack(
+        [centers, centers - 1, centers + 1, centers - width, centers + width],
+        axis=1,
+    )
+
 def build_collocation_pools(
     phi_initial: np.ndarray,
     contour: ContourCondition,

@@ -97,6 +97,60 @@ def curvature_velocity_loss(curvature_velocity: torch.Tensor) -> torch.Tensor:
     return torch.mean(curvature_velocity * curvature_velocity)
 
 
+def normal_consistency_loss(
+    phi_stencil: torch.Tensor,
+    target_stencil: torch.Tensor,
+    pixel_size_x: float = 1.0,
+    pixel_size_y: float = 1.0,
+    eps: float = 1.0e-8,
+) -> torch.Tensor:
+    """Align predicted and target normals using center/left/right/up/down samples."""
+
+    if phi_stencil.ndim != 2 or phi_stencil.shape[1] != 5:
+        raise ValueError("phi_stencil must have shape (batch, 5)")
+    if target_stencil.shape != phi_stencil.shape:
+        raise ValueError("target_stencil must match phi_stencil")
+    if pixel_size_x <= 0.0 or pixel_size_y <= 0.0:
+        raise ValueError("pixel sizes must be positive")
+
+    pred_x = (phi_stencil[:, 2] - phi_stencil[:, 1]) / (2.0 * float(pixel_size_x))
+    pred_y = (phi_stencil[:, 4] - phi_stencil[:, 3]) / (2.0 * float(pixel_size_y))
+    target_x = (target_stencil[:, 2] - target_stencil[:, 1]) / (2.0 * float(pixel_size_x))
+    target_y = (target_stencil[:, 4] - target_stencil[:, 3]) / (2.0 * float(pixel_size_y))
+    pred_norm = torch.sqrt(pred_x * pred_x + pred_y * pred_y + eps)
+    target_norm = torch.sqrt(target_x * target_x + target_y * target_y + eps)
+    cosine = (pred_x * target_x + pred_y * target_y) / (pred_norm * target_norm)
+    return torch.mean(1.0 - torch.clamp(cosine, -1.0, 1.0))
+
+
+def velocity_neighbor_smoothness_loss(
+    velocity_stencil: torch.Tensor,
+    average_rate: torch.Tensor,
+    pixel_size_x: float = 1.0,
+    pixel_size_y: float = 1.0,
+    eps: float = 1.0e-12,
+) -> torch.Tensor:
+    """Penalize full-feature velocity changes between adjacent grid points."""
+
+    if velocity_stencil.ndim != 2 or velocity_stencil.shape[1] != 5:
+        raise ValueError("velocity_stencil must have shape (batch, 5)")
+    if pixel_size_x <= 0.0 or pixel_size_y <= 0.0:
+        raise ValueError("pixel sizes must be positive")
+
+    rate_scale = torch.clamp(torch.abs(average_rate), min=eps)
+    normalized = velocity_stencil / rate_scale
+    center = normalized[:, 0]
+    differences = torch.stack(
+        [
+            (normalized[:, 1] - center) / float(pixel_size_x),
+            (normalized[:, 2] - center) / float(pixel_size_x),
+            (normalized[:, 3] - center) / float(pixel_size_y),
+            (normalized[:, 4] - center) / float(pixel_size_y),
+        ],
+        dim=1,
+    )
+    return torch.mean(differences * differences)
+
 def velocity_jacobian_loss(
     normal_velocity: torch.Tensor,
     features: torch.Tensor,

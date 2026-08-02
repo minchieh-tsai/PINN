@@ -111,6 +111,79 @@ class CurvatureVelocityTests(unittest.TestCase):
         expected = average_rate * (1.0 + 0.25 * torch.tanh(features[:, 11] / 0.5))
         torch.testing.assert_close(velocity, expected)
 
+    def test_smoothing_mode_has_process_independent_negative_curvature_velocity(self):
+        dtype = torch.float64
+        config = {
+            "solution_hidden_dim": 4,
+            "solution_depth": 1,
+            "velocity_hidden_dim": 4,
+            "velocity_depth": 1,
+            "contour_embedding_dim": 4,
+            "velocity_residual_fraction": 0.0,
+            "use_curvature_velocity": True,
+            "learn_curvature_velocity_weight": False,
+            "curvature_velocity_weight": 0.25,
+            "curvature_velocity_mode": "smoothing",
+            "curvature_reference": 0.5,
+        }
+        from epi_pinn.models import EtchPINN
+
+        features = torch.zeros((1, len(FEATURE_NAMES)), dtype=dtype)
+        features[:, 11] = 0.5
+        contour = torch.zeros((20, 3), dtype=dtype)
+        average_rate = torch.tensor(2.0, dtype=dtype)
+        expected = -average_rate * 0.25 * torch.tanh(features[:, 11] / 0.5)
+
+        for model in (DepositionPINN(config), EtchPINN(config)):
+            model = model.to(dtype=dtype)
+            component = model.velocity_components(features, contour, average_rate)["curvature"]
+            torch.testing.assert_close(component, expected)
+    def test_smoothing_curvature_reduces_sinusoidal_interface_amplitude(self):
+        dtype = torch.float64
+        model = DepositionPINN(
+            {
+                "solution_hidden_dim": 4,
+                "solution_depth": 1,
+                "velocity_hidden_dim": 4,
+                "velocity_depth": 1,
+                "contour_embedding_dim": 4,
+                "velocity_residual_fraction": 0.0,
+                "use_curvature_velocity": True,
+                "learn_curvature_velocity_weight": False,
+                "curvature_velocity_weight": 0.1,
+                "curvature_velocity_mode": "smoothing",
+                "curvature_velocity_form": "linear",
+            }
+        ).to(dtype=dtype)
+
+        x = torch.linspace(0.0, 2.0 * torch.pi, 257, dtype=dtype)[:-1]
+        amplitude = 0.5
+        wave_number = 2.0
+        interface = amplitude * torch.sin(wave_number * x)
+        slope = amplitude * wave_number * torch.cos(wave_number * x)
+        curvature = (
+            amplitude
+            * wave_number**2
+            * torch.sin(wave_number * x)
+            / torch.pow(1.0 + slope * slope, 1.5)
+        )
+
+        features = torch.zeros((x.numel(), len(FEATURE_NAMES)), dtype=dtype)
+        features[:, 11] = curvature
+        contour = torch.zeros((20, 3), dtype=dtype)
+        average_rate = torch.tensor(2.0, dtype=dtype)
+        curvature_velocity = model.velocity_components(
+            features,
+            contour,
+            average_rate,
+        )["curvature"]
+
+        updated_interface = interface + 0.05 * curvature_velocity * torch.sqrt(1.0 + slope * slope)
+        original_amplitude = 0.5 * (torch.max(interface) - torch.min(interface))
+        updated_amplitude = 0.5 * (torch.max(updated_interface) - torch.min(updated_interface))
+
+        self.assertLess(float(updated_amplitude), float(original_amplitude))
+
     def test_curvature_velocity_weight_can_be_learned(self):
         dtype = torch.float64
         model = DepositionPINN(

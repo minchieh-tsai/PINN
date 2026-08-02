@@ -188,6 +188,11 @@ def main():
     )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--figure", default=None)
+    parser.add_argument(
+        "--all-steps-figure",
+        default=None,
+        help="Output path for the 1M-through-4E prediction overview",
+    )
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--contour-mode", choices=["main", "filtered", "all"], default="main")
     parser.add_argument("--min-contour-points", type=int, default=25)
@@ -210,8 +215,9 @@ def main():
         write_prediction_workbook,
     )
     from epi_pinn.rollout import _infer_process_rate, _load_model, predict_next_levelset
-    from epi_pinn.sdf import ensure_signed_distance, rebuild_sdf_from_mask
+    from epi_pinn.sdf import ensure_signed_distance, smooth_and_rebuild_sdf
     from epi_pinn.train import torch_dtype
+    from epi_pinn.visualize import save_zero_contour_grid
 
     config = load_config(args.config)
     config_root = project_root_from_config_path(args.config)
@@ -280,9 +286,13 @@ def main():
         )
         for process_name in ("deposition", "etch")
     }
-    reinitialize_sdf = bool(
-        config.get("rollout", {}).get("reinitialize_sdf_each_step", True)
-    )
+    rollout_cfg = config.get("rollout", {})
+    reinitialize_sdf = bool(rollout_cfg.get("reinitialize_sdf_each_step", True))
+    smoothing_sigma_px = float(rollout_cfg.get("interface_smoothing_sigma_px", 0.0))
+    if smoothing_sigma_px != 0.0 and not 0.5 <= smoothing_sigma_px <= 1.0:
+        raise ValueError("rollout.interface_smoothing_sigma_px must be 0 or between 0.5 and 1.0")
+    if smoothing_sigma_px > 0.0 and not reinitialize_sdf:
+        raise ValueError("interface smoothing requires reinitialize_sdf_each_step: true")
 
     durations = (
         list(args.times)
@@ -307,7 +317,7 @@ def main():
             device=device, dtype=dtype,
         )
         if reinitialize_sdf:
-            phi = rebuild_sdf_from_mask(phi < 0.0)
+            phi = smooth_and_rebuild_sdf(phi, smoothing_sigma_px)
 
         predictions[output_state] = phi
         np.save(prediction_dir / f"{output_state}.npy", phi)
@@ -338,7 +348,28 @@ def main():
         resolve_path(args.figure, config_root)
         if args.figure else prediction_dir / "4M_4E_on_5M_5E_TEM.png"
     )
+    all_steps_figure = (
+        resolve_path(args.all_steps_figure, config_root)
+        if args.all_steps_figure
+        else prediction_dir / "predictions_1M_to_4E.png"
+    )
     if not args.no_plot:
+        prediction_states = [state for _process, _cycle, state in ROLLOUT_STEPS]
+        step_gt_arrays = {
+            state: ensure_signed_distance(raw_states[state], level_cfg)
+            for state in prediction_states
+            if state in raw_states
+        }
+        save_zero_contour_grid(
+            predictions,
+            str(all_steps_figure),
+            prediction_states,
+            gt_arrays=step_gt_arrays,
+            title="Eight-step prediction phi=0 contours (1M through 4E)",
+            contour_mode=args.contour_mode,
+            min_contour_points=args.min_contour_points,
+            border_margin=args.border_margin,
+        )
         save_overlay(
             predictions, states, tem_paths, figure,
             contour_mode=args.contour_mode,
@@ -347,7 +378,8 @@ def main():
         )
 
     manifest = {
-        \
+        "config": str(Path(args.config).resolve()),
+        "workbook": str(workbook_path.resolve()) if workbook_path else None,
         "start_state": "init",
         "rollout_steps": manifest_steps,
         "iteration_times_s": {
@@ -362,7 +394,11 @@ def main():
             for state, path in tem_paths.items()
         },
         "reinitialize_sdf_each_step": reinitialize_sdf,
+        "interface_smoothing_sigma_px": smoothing_sigma_px,
         "figure": str(figure.resolve()) if not args.no_plot else None,
+        "all_steps_figure": (
+            str(all_steps_figure.resolve()) if not args.no_plot else None
+        ),
     }
     with (prediction_dir / "manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
@@ -370,6 +406,7 @@ def main():
     print("Saved prediction states: 1M, 1E, 2M, 2E, 3M, 3E, 4M, 4E")
     print(f"Saved predictions: {prediction_dir}")
     if not args.no_plot:
+        print(f"Saved all-step overview: {all_steps_figure}")
         print(f"Saved TEM overlay: {figure}")
     for comparison, values in metrics.items():
         print(

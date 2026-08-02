@@ -22,7 +22,7 @@ from epi_pinn.contour import extract_contour20, save_contour_csv
 from epi_pinn.excel_io import load_state_arrays, write_prediction_workbook
 from epi_pinn.models import DepositionPINN, EtchPINN
 from epi_pinn.sampling import build_features, full_grid_query
-from epi_pinn.sdf import ensure_signed_distance, rebuild_sdf_from_mask
+from epi_pinn.sdf import ensure_signed_distance, smooth_and_rebuild_sdf
 from epi_pinn.train import torch_dtype
 
 
@@ -138,7 +138,13 @@ def run_rollout(config_path: str, infer_missing_rates: bool = False, allow_basel
     states = load_state_arrays(config, base_dir=root)
     level_cfg = config.get("level_set", {})
     start_state = str(config.get("rollout", {}).get("start_state", "2E"))
-    reinitialize_sdf_each_step = bool(config.get("rollout", {}).get("reinitialize_sdf_each_step", False))
+    rollout_cfg = config.get("rollout", {})
+    reinitialize_sdf_each_step = bool(rollout_cfg.get("reinitialize_sdf_each_step", False))
+    smoothing_sigma_px = float(rollout_cfg.get("interface_smoothing_sigma_px", 0.0))
+    if smoothing_sigma_px != 0.0 and not 0.5 <= smoothing_sigma_px <= 1.0:
+        raise ValueError("rollout.interface_smoothing_sigma_px must be 0 or between 0.5 and 1.0")
+    if smoothing_sigma_px > 0.0 and not reinitialize_sdf_each_step:
+        raise ValueError("interface smoothing requires reinitialize_sdf_each_step: true")
     phi = ensure_signed_distance(states[start_state], level_cfg)
 
     out_dir = output_dir(config, root)
@@ -174,7 +180,7 @@ def run_rollout(config_path: str, infer_missing_rates: bool = False, allow_basel
             )
         phi = predict_next_levelset(phi, duration, rate, process_sign, config, model, device=device, dtype=dtype)
         if reinitialize_sdf_each_step:
-            phi = rebuild_sdf_from_mask(phi < 0.0)
+            phi = smooth_and_rebuild_sdf(phi, smoothing_sigma_px)
         predictions[output_state] = phi
         np.save(prediction_dir / f"{output_state}.npy", phi)
         contour = extract_contour20(

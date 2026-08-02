@@ -29,9 +29,11 @@ from epi_pinn.losses import (
     endpoint_mae_loss,
     endpoint_sdf_loss,
     levelset_derivatives,
+    normal_consistency_loss,
     pde_residual_loss,
     sign_loss,
     velocity_jacobian_loss,
+    velocity_neighbor_smoothness_loss,
 )
 from epi_pinn.models import DepositionPINN, EtchPINN
 from epi_pinn.sampling import (
@@ -40,12 +42,13 @@ from epi_pinn.sampling import (
     full_grid_query,
     sample_collocation_indices,
     sample_endpoint_indices,
+    sample_neighbor_stencils,
     transition_key,
 )
 from epi_pinn.sdf import ensure_signed_distance
 
 
-LossRow = Tuple[int, str, float, float, float, float, float, float, float, float, float, float, float, float]
+LossRow = Tuple[Any, ...]
 
 
 def torch_dtype(name: str) -> torch.dtype:
@@ -157,6 +160,9 @@ def _prepare_transitions(
                 "narrow_band": narrow_band,
                 "clip_distance": clip_distance,
                 "process_sign": process_sign,
+                "shape": phi_target.shape,
+                "pixel_size_x": pixel_size_x,
+                "pixel_size_y": pixel_size_y,
                 "length_x": max(pixel_size_x, (width - 1) * pixel_size_x),
                 "length_y": max(pixel_size_y, (height - 1) * pixel_size_y),
                 "collocation_pools": build_collocation_pools(phi_initial, contour, narrow_band),
@@ -174,6 +180,9 @@ def _sample_training_batch(
     collocation_contour_fraction: float,
     collocation_global_fraction: float,
     use_physics_terms: bool,
+    smoothness_batch_size: int,
+    use_smoothness_terms: bool,
+    smoothness_band_distance: float,
     rng: np.random.Generator,
 ) -> Dict[str, np.ndarray]:
     batch = {
@@ -196,6 +205,13 @@ def _sample_training_batch(
         )
         batch["collocation_indices"] = collocation_indices
         batch["collocation_tau"] = collocation_tau
+    if use_smoothness_terms:
+        batch["smoothness_stencils"] = sample_neighbor_stencils(
+            item["phi_target"].reshape(item["shape"]),
+            smoothness_batch_size,
+            smoothness_band_distance,
+            rng,
+        )
     return batch
 
 
@@ -226,7 +242,53 @@ def _compute_training_losses(
     sign = zero
     velocity_jacobian = zero
     curvature_velocity = zero
+    normal_consistency = zero
+    velocity_smoothness = zero
     loss = loss_weights["sdf"] * sdf + loss_weights["dice"] * dice + loss_weights["mae"] * mae
+
+    if "smoothness_stencils" in batch:
+        stencil_indices = batch["smoothness_stencils"]
+        flat_indices = stencil_indices.reshape(-1)
+        stencil_features = torch.as_tensor(
+            item["features"][flat_indices], dtype=dtype, device=device
+        )
+        stencil_raw_phi0 = torch.as_tensor(
+            item["raw_phi0"][flat_indices], dtype=dtype, device=device
+        )
+        stencil_phi, stencil_velocity = model(
+            stencil_features,
+            contour,
+            stencil_raw_phi0,
+            duration,
+            rate,
+            item["clip_distance"],
+            length_y=item["length_y"],
+        )
+        stencil_shape = stencil_indices.shape
+        stencil_phi = stencil_phi.reshape(stencil_shape)
+        stencil_velocity = stencil_velocity.reshape(stencil_shape)
+        stencil_target = torch.as_tensor(
+            item["phi_target"][stencil_indices], dtype=dtype, device=device
+        )
+        if loss_weights["normal_consistency"] > 0.0:
+            normal_consistency = normal_consistency_loss(
+                stencil_phi,
+                stencil_target,
+                item["pixel_size_x"],
+                item["pixel_size_y"],
+            )
+        if loss_weights["velocity_smoothness"] > 0.0:
+            velocity_smoothness = velocity_neighbor_smoothness_loss(
+                stencil_velocity,
+                rate,
+                item["pixel_size_x"],
+                item["pixel_size_y"],
+            )
+        loss = (
+            loss
+            + loss_weights["normal_consistency"] * normal_consistency
+            + loss_weights["velocity_smoothness"] * velocity_smoothness
+        )
 
     if use_physics_terms:
         collocation_indices = batch["collocation_indices"]
@@ -288,6 +350,8 @@ def _compute_training_losses(
         "sign": sign,
         "velocity_jacobian": velocity_jacobian,
         "curvature_velocity": curvature_velocity,
+        "normal_consistency": normal_consistency,
+        "velocity_smoothness": velocity_smoothness,
     }
 
 
@@ -305,6 +369,8 @@ def _append_log_row(rows: List[LossRow], step: int, item: Mapping[str, Any], los
             float(losses["sign"].detach().cpu()),
             float(losses["velocity_jacobian"].detach().cpu()),
             float(losses["curvature_velocity"].detach().cpu()),
+            float(losses["normal_consistency"].detach().cpu()),
+            float(losses["velocity_smoothness"].detach().cpu()),
             current_beta_kappa(model),
             current_transport_alpha(model),
             current_transport_ld(model),
@@ -342,6 +408,10 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
     steps = int(training_cfg.get("adam_steps", 10000))
     batch_size = int(training_cfg.get("endpoint_batch_size", 4096))
     collocation_batch_size = int(training_cfg.get("collocation_batch_size", batch_size))
+    smoothness_batch_size = int(training_cfg.get("smoothness_batch_size", min(batch_size, 2048)))
+    smoothness_band_distance = float(loss_cfg.get("normal_consistency_band_px", 4.0))
+    if smoothness_band_distance <= 0.0:
+        raise ValueError("loss.normal_consistency_band_px must be positive")
     log_every = int(training_cfg.get("log_every", 100))
     checkpoint_every = int(training_cfg.get("checkpoint_every", 500))
     grad_clip = float(training_cfg.get("grad_clip_norm", 10.0))
@@ -359,6 +429,8 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
         "sign": float(loss_cfg.get("sign", 0.05)),
         "velocity_jacobian": float(loss_cfg.get("velocity_jacobian", 0.0)),
         "curvature_velocity": float(loss_cfg.get("curvature_velocity", 0.0)),
+        "normal_consistency": float(loss_cfg.get("normal_consistency", 0.0)),
+        "velocity_smoothness": float(loss_cfg.get("velocity_smoothness", 0.0)),
     }
     use_physics_terms = collocation_batch_size > 0 and (
         loss_weights["pde"] > 0.0
@@ -366,6 +438,10 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
         or loss_weights["sign"] > 0.0
         or loss_weights["velocity_jacobian"] > 0.0
         or loss_weights["curvature_velocity"] > 0.0
+    )
+    use_smoothness_terms = smoothness_batch_size > 0 and (
+        loss_weights["normal_consistency"] > 0.0
+        or loss_weights["velocity_smoothness"] > 0.0
     )
 
     out_dir = output_dir(config, root)
@@ -389,6 +465,9 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
             collocation_contour_fraction,
             collocation_global_fraction,
             use_physics_terms,
+            smoothness_batch_size,
+            use_smoothness_terms,
+            smoothness_band_distance,
             rng,
         )
         optimizer.zero_grad(set_to_none=True)
@@ -433,6 +512,9 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                 collocation_contour_fraction,
                 collocation_global_fraction,
                 use_physics_terms,
+                smoothness_batch_size,
+                use_smoothness_terms,
+                smoothness_band_distance,
                 rng,
             )
             latest_losses: Dict[str, torch.Tensor] = {}
@@ -479,6 +561,8 @@ def train_process(config_path: str, process_name: str, infer_missing_rates: bool
                 "sign_loss",
                 "velocity_jacobian_loss",
                 "curvature_velocity_loss",
+                "normal_consistency_loss",
+                "velocity_smoothness_loss",
                 "beta_kappa",
                 "transport_alpha",
                 "transport_ld",

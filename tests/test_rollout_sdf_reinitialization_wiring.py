@@ -18,13 +18,13 @@ def rollout_block(config_text: str) -> str:
 
 
 class RolloutSdfReinitializationWiringTests(unittest.TestCase):
-    def test_rollout_reinitializes_sdf_after_each_prediction_when_enabled(self):
+    def test_rollout_smooths_and_reinitializes_sdf_after_each_prediction(self):
         rollout = read_repo_file("src/epi_pinn/rollout.py")
 
-        self.assertIn("rebuild_sdf_from_mask", rollout)
+        self.assertIn("smooth_and_rebuild_sdf", rollout)
         self.assertIn("reinitialize_sdf_each_step", rollout)
-        self.assertIn("bool(config.get(\"rollout\", {}).get(\"reinitialize_sdf_each_step\", False))", rollout)
-        self.assertIn("phi = rebuild_sdf_from_mask(phi < 0.0)", rollout)
+        self.assertIn("interface_smoothing_sigma_px", rollout)
+        self.assertIn("phi = smooth_and_rebuild_sdf(phi, smoothing_sigma_px)", rollout)
 
     def test_configs_enable_rollout_sdf_reinitialization(self):
         for path in (
@@ -36,6 +36,15 @@ class RolloutSdfReinitializationWiringTests(unittest.TestCase):
             with self.subTest(path=path):
                 config = read_repo_file(path)
                 self.assertRegex(rollout_block(config), r"(?m)^  reinitialize_sdf_each_step: true$")
+
+    def test_physics_configs_enable_subpixel_interface_smoothing(self):
+        for path in ("configs/default.yaml", "configs/ablation_full_physics.yaml"):
+            with self.subTest(path=path):
+                config = read_repo_file(path)
+                self.assertRegex(
+                    rollout_block(config),
+                    r"(?m)^  interface_smoothing_sigma_px: 0\.75$",
+                )
 
 
 if __name__ == "__main__":
