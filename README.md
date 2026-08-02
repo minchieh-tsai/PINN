@@ -49,6 +49,60 @@ python scripts/run_rollout.py --config configs/default.yaml --infer-missing-rate
 python scripts/evaluate_holdout.py --config configs/default.yaml
 ```
 
+## CMA-ES Time Optimization
+
+Optimize the eight rollout durations from `1M` through `4E` while keeping the
+trained deposition and etch models fixed. The objective is:
+
+```text
+zero_chamfer(predicted 4M, GT 5M)
++ zero_chamfer(predicted 4E, GT 5E)
+```
+
+Install the project first so that the `cma` dependency is available, then run:
+
+```bash
+python -m pip install -e .
+
+python scripts/optimize_1m_to_4e_times_cmaes.py \
+  --config configs/ablation_full_physics.yaml \
+  --workbook data/raw/deposition.xlsx \
+  --infer-missing-rates
+```
+
+Resume an interrupted or extended search from the saved CMA-ES state:
+
+```bash
+python scripts/optimize_1m_to_4e_times_cmaes.py \
+  --config configs/ablation_full_physics.yaml \
+  --workbook data/raw/deposition.xlsx \
+  --infer-missing-rates \
+  --resume
+```
+
+The optimizer uses the training-time duration references instead of
+normalizing each candidate duration by itself. With the full-physics config,
+deposition uses `duration / 9000` and etch uses `duration / 50`. Rates are
+inferred once and kept fixed throughout the search.
+
+Results are written below the configured artifact directory:
+
+```text
+time_optimization/
+|-- optimization_history.csv
+|-- best_result.json
+|-- cmaes_state.pkl
+`-- best/
+    |-- 1M.npy ... 4E.npy
+    |-- predictions_1m_to_4e.xlsx
+    |-- comparison_metrics.json
+    |-- manifest.json
+    `-- 4M_4E_on_5M_5E.png
+```
+
+The `5M` and `5E` sheets are calibration targets for this optimization and
+must not be treated as unbiased holdout data afterward.
+
 ## Visualization and Train-Range Replay
 
 Plot rollout predictions `3M` through `5E` after `run_rollout.py` has created
@@ -94,7 +148,10 @@ loss share:
 artifacts/figures/training_loss_breakdown.png
 ```
 
-## Notes
+## Tests
 
-The generated code intentionally does not create `tests/`, pytest files, or CI
-configuration because the source spec excludes those artifacts.
+Run the CMA-ES optimizer unit and resume tests with:
+
+```bash
+python -m unittest tests/test_cmaes_time_optimization.py
+```
