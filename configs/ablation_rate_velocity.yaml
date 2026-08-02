@@ -89,8 +89,8 @@ model:
   use_nominal_rate_solution: true
   use_process_condition_features: true
   hard_initial_condition: true
-  correction_scale: 0.20
-  velocity_residual_fraction: 0.20
+  correction_scale: 0.10
+  velocity_residual_fraction: 0.10
   use_transport_velocity: false
   learn_transport_alpha: false
   transport_alpha: 0.0
@@ -114,10 +114,13 @@ loss:
   dice: 1.0
   mae: 0.5
   pde: 0.2
-  eikonal: 0.10
+  eikonal: 0.15
   average_rate: 0.5
-  velocity_jacobian: 1.0e-3
+  velocity_jacobian: 3.0e-3
   curvature_velocity: 0.0
+  normal_consistency: 0.1
+  normal_consistency_band_px: 4.0
+  velocity_smoothness: 0.01
   sign: 0.05
   area_monotonic: 0.1
   contour_initial_condition: 0.1
@@ -132,6 +135,7 @@ training:
   seed: 42
   device: auto
   dtype: float64
+  smoothness_batch_size: 2048
   adam_steps: 20000
   adam_lr: 3.0e-4
   endpoint_batch_size: 8192
@@ -150,6 +154,7 @@ rollout:
   start_state: 2E
   save_intermediate: true
   reinitialize_sdf_each_step: true
+  interface_smoothing_sigma_px: 0.75
 
 evaluation:
   holdout_deposition_state: 5M
