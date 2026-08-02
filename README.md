@@ -49,6 +49,52 @@ python scripts/run_rollout.py --config configs/default.yaml --infer-missing-rate
 python scripts/evaluate_holdout.py --config configs/default.yaml
 ```
 
+## Rate-Velocity Smoothing Ablation
+
+Run three controlled 5,000-step rate-velocity experiments: restored-capacity
+control, normal-consistency only, and combined mild smoothing. Each checkpoint
+is evaluated with rollout smoothing `sigma=0` and `sigma=0.5` without
+retraining:
+
+```bash
+python scripts/run_rate_velocity_smoothing_ablation.py \
+  --infer-missing-rates
+```
+
+Add `--full-train-winner` to automatically retrain the selected configuration
+for 20,000 Adam steps after the short experiments:
+
+```bash
+python scripts/run_rate_velocity_smoothing_ablation.py \
+  --infer-missing-rates \
+  --full-train-winner
+```
+
+To recompute predictions and metrics from existing short-run checkpoints:
+
+```bash
+python scripts/run_rate_velocity_smoothing_ablation.py \
+  --infer-missing-rates \
+  --skip-data-prep \
+  --skip-training \
+  --overwrite
+```
+
+The selector requires both in-sample and rollout Chamfer/MAE to stay within 5%
+of the unsmoothed control and rejects additional zero-contour components. Among
+eligible candidates, it selects the lowest mean curvature total variation.
+Combined results and the selection decision are saved in:
+
+```text
+artifacts/rate_velocity_smoothing_ablation/
+|-- metrics.csv
+|-- selection.json
+`-- selected_full_config.yaml  # created with --full-train-winner
+```
+
+Per-experiment in-sample metrics and isolated rollout snapshots are stored in
+`artifacts/ablation_rate_velocity_{control,normal,smooth}/`.
+
 ## CMA-ES Time Optimization
 
 Optimize the eight rollout durations from `1M` through `4E` while keeping the

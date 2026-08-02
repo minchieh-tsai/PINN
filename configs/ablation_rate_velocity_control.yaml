@@ -1,0 +1,163 @@
+project:
+  name: epi_levelset_pinn_poc
+  output_dir: artifacts/ablation_rate_velocity_control
+
+data:
+  expected_height: 350
+  expected_width: 200
+  array_order: HW
+  allow_transpose: true
+  workbooks:
+    deposition: data/raw/deposition.xlsx
+    etch: data/raw/deposition.xlsx
+  state_sources:
+    init: {workbook: deposition, sheet: init}
+    1M: {workbook: deposition, sheet: "1"}
+    1E: {workbook: etch, sheet: "1"}
+    2M: {workbook: deposition, sheet: "2"}
+    2E: {workbook: etch, sheet: "2"}
+    5M: {workbook: deposition, sheet: "5"}
+    5E: {workbook: etch, sheet: "5"}
+
+spatial:
+  pixel_size_x: 1.0
+  pixel_size_y: 1.0
+  unit: pixel
+  y_axis_direction: down
+
+level_set:
+  input_kind: signed_distance
+  sign_convention: negative_inside
+  value_unit: pixel
+  rebuild_sdf: true
+  phi_clip_distance: 32.0
+  narrow_band_distance: 4.0
+
+contour:
+  num_points: 20
+  x_sampling: uniform
+  crossing_policy: closest_to_previous
+  first_crossing_policy: topmost
+  min_valid_points: 10
+  consistency_tolerance_px: 2.0
+
+schedule:
+  deposition_seconds: {1: 9000, 2: 8000, 3: 7000, 4: 6000, 5: 5000}
+  etch_seconds: {1: 50, 2: 50, 3: 50, 4: 50, 5: 50}
+
+processes:
+  deposition:
+    sign: 1.0
+    rate_unit: pixel/s
+    rate_definition: normal_interface_speed
+    average_rate_default: null
+    average_rate_by_cycle: {1: null, 2: null, 3: null, 4: null, 5: null}
+    duration_reference_s: 9000.0
+    rate_reference: null
+  etch:
+    sign: -1.0
+    rate_unit: pixel/s
+    rate_definition: normal_interface_speed
+    average_rate_default: null
+    average_rate_by_cycle: {1: null, 2: null, 3: null, 4: null, 5: null}
+    duration_reference_s: 50.0
+    rate_reference: null
+
+transitions:
+  deposition_train:
+    - {id: M1, cycle: 1, input_state: init, target_state: 1M}
+    - {id: M2, cycle: 2, input_state: 1E, target_state: 2M}
+  etch_train:
+    - {id: E1, cycle: 1, input_state: 1M, target_state: 1E}
+    - {id: E2, cycle: 2, input_state: 2M, target_state: 2E}
+
+normalization:
+  x_range: [-1.0, 1.0]
+  y_range: [-1.0, 1.0]
+  tau_range: [0.0, 1.0]
+  normalize_duration: true
+  normalize_rate: true
+  normalize_nominal_displacement: true
+
+model:
+  activation: tanh
+  solution_hidden_dim: 128
+  solution_depth: 6
+  velocity_hidden_dim: 64
+  velocity_depth: 4
+  contour_embedding_dim: 64
+  use_nominal_rate_solution: true
+  use_process_condition_features: true
+  hard_initial_condition: true
+  correction_scale: 0.20
+  velocity_residual_fraction: 0.20
+  use_transport_velocity: false
+  learn_transport_alpha: false
+  transport_alpha: 0.0
+  transport_alpha_max: 1.0
+  learn_transport_ld: false
+  transport_ld: 50.0
+  transport_ld_min: 1.0
+  transport_depth_unit: pixel
+  use_curvature_feature: true
+  use_curvature_velocity: false
+  learn_curvature_velocity_weight: false
+  curvature_velocity_weight: 0.0
+  curvature_velocity_weight_max: 0.05
+  curvature_velocity_sign: 1.0
+  curvature_velocity_form: linear
+  curvature_mcoeff: 1.0
+  curvature_reference: 0.1
+
+loss:
+  sdf: 1.0
+  dice: 1.0
+  mae: 0.5
+  pde: 0.2
+  eikonal: 0.10
+  average_rate: 0.5
+  velocity_jacobian: 1.0e-3
+  curvature_velocity: 0.0
+  normal_consistency: 0.0
+  normal_consistency_band_px: 4.0
+  velocity_smoothness: 0.0
+  sign: 0.05
+  area_monotonic: 0.1
+  contour_initial_condition: 0.1
+
+sampling:
+  endpoint_interface_fraction: 0.85
+  collocation_interface_fraction: 0.75
+  collocation_contour_fraction: 0.20
+  collocation_global_fraction: 0.05
+
+training:
+  seed: 42
+  device: auto
+  dtype: float64
+  smoothness_batch_size: 2048
+  adam_steps: 5000
+  adam_lr: 3.0e-4
+  endpoint_batch_size: 8192
+  collocation_batch_size: 8192
+  grad_clip_norm: 10.0
+  checkpoint_every: 500
+  log_every: 100
+  use_lbfgs: false
+  lbfgs_steps: 0
+  lbfgs_lr: 1.0
+  lbfgs_max_iter: 20
+  lbfgs_history_size: 50
+  lbfgs_line_search_fn: strong_wolfe
+
+rollout:
+  start_state: 2E
+  save_intermediate: true
+  reinitialize_sdf_each_step: true
+  interface_smoothing_sigma_px: 0.0
+
+evaluation:
+  holdout_deposition_state: 5M
+  holdout_etch_state: 5E
+  compare_known_rate_baseline: true
+  export_prediction_workbook: true
