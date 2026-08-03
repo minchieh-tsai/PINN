@@ -18,10 +18,11 @@ dependencies = [
   "torch",
   "scikit-image",
   "matplotlib",
+  "cma>=4.4.4,<5",
 ]
 
 [project.optional-dependencies]
-dev = []
+dev = ["pytest>=8,<9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -18,6 +18,19 @@ def rebuild_sdf_from_mask(mask_inside: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(distance_outside - distance_inside, dtype=np.float64)
 
 
+def gaussian_smooth_interface(phi: np.ndarray, sigma: float) -> np.ndarray:
+    """Smooth an interface and rebuild its signed-distance representation."""
+
+    sigma_value = float(sigma)
+    if not np.isfinite(sigma_value) or sigma_value < 0.0:
+        raise ValueError("sigma must be finite and nonnegative")
+    array = np.ascontiguousarray(np.asarray(phi, dtype=np.float64))
+    if sigma_value == 0.0:
+        return array.copy()
+    smoothed = ndimage.gaussian_filter(array, sigma=sigma_value, mode="nearest")
+    return rebuild_sdf_from_mask(smoothed < 0.0)
+
+
 def ensure_signed_distance(phi: np.ndarray, level_set_config: Mapping[str, object]) -> np.ndarray:
     input_kind = str(level_set_config.get("input_kind", "signed_distance"))
     rebuild = bool(level_set_config.get("rebuild_sdf", False))

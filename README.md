@@ -98,3 +98,125 @@ artifacts/figures/training_loss_breakdown.png
 
 The generated code intentionally does not create `tests/`, pytest files, or CI
 configuration because the source spec excludes those artifacts.
+
+
+## CMA-ES Time Optimization
+
+The independent optimizer searches eight continuous schedule multipliers for
+`1M, 1E, 2M, 2E, 3M, 3E, 4M, 4E`. Its objective is the sum of the
+`4M -> GT 5M` and `4E -> GT 5E` zero-contour symmetric Chamfer distances,
+plus the weighted penalty hooks in `src/epi_pinn/time_objective.py`.
+
+Two normalization stages are available and write to separate directories:
+
+- `legacy` (default) exactly follows the inference behavior at base commit
+  `2ab4856`: `duration_normalized = duration / duration = 1` and
+  `rate_normalized = rate / rate = 1`. Time still changes nominal
+  displacement through `rate * duration`, but the network duration feature
+  remains constant.
+- `training-reference` passes each candidate duration through the configured
+  `duration_reference_s`. The rate uses a fixed configured reference, or a
+  rate inferred once before optimization when `rate_reference` is null. This
+  exposes candidate duration changes to the network in the same normalization
+  convention used during training.
+
+Install the optimizer and test dependencies:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Stage 1, reproduce legacy inference:
+
+```bash
+python scripts/optimize_1m_to_4e_times_cmaes.py \
+  --config configs/ablation_full_physics.yaml \
+  --workbook data/raw/deposition.xlsx \
+  --infer-missing-rates \
+  --normalization-mode legacy
+```
+
+Resume the same run:
+
+```bash
+python scripts/optimize_1m_to_4e_times_cmaes.py \
+  --config configs/ablation_full_physics.yaml \
+  --workbook data/raw/deposition.xlsx \
+  --infer-missing-rates \
+  --normalization-mode legacy \
+  --resume
+```
+
+Stage 2, use training-reference normalization:
+
+```bash
+python scripts/optimize_1m_to_4e_times_cmaes.py \
+  --config configs/ablation_full_physics.yaml \
+  --workbook data/raw/deposition.xlsx \
+  --infer-missing-rates \
+  --normalization-mode training-reference
+```
+
+The two result roots are:
+
+```text
+artifacts/ablation_full_physics/time_optimization/legacy/
+artifacts/ablation_full_physics/time_optimization/training-reference/
+```
+
+Each contains `optimization_history.csv`, `current_best.json`,
+`best_result.json`, `run_manifest.json`, the CMA state, and final prediction
+artifacts under `best/`. Resume verifies config, workbook, checkpoints,
+normalization mode, bounds, weights, and the penalty source hash.
+
+The `merge_penalty()` and `down_penalty()` functions are deliberately marked
+`TO-DO` and currently return zero. After implementing either penalty, start a
+new output directory because the penalty source hash intentionally invalidates
+old resume state.
+
+The workbook `5M` and `5E` sheets are calibration targets in these runs.
+They must not also be reported as unbiased holdout results.
+
+## Cycle Visualization
+
+Render the standard in-sample and rollout sequence. The default rollout starts
+from GT `2E`; use `--rollout-start predicted-2e` to carry the predicted
+training-range state forward.
+
+```bash
+python scripts/visualize_cycle_predictions.py \
+  --mode standard \
+  --config configs/ablation_full_physics.yaml \
+  --workbook data/raw/deposition.xlsx \
+  --infer-missing-rates \
+  --normalization-mode legacy \
+  --rollout-start gt-2e
+```
+
+Render the exact settings saved by a legacy CMA-ES result:
+
+```bash
+python scripts/visualize_cycle_predictions.py \
+  --mode cmaes \
+  --config configs/ablation_full_physics.yaml \
+  --workbook data/raw/deposition.xlsx \
+  --infer-missing-rates \
+  --best-result artifacts/ablation_full_physics/time_optimization/legacy/best_result.json
+```
+
+For the second stage, point `--best-result` at the
+`training-reference/best_result.json` file. The script reads and enforces the
+saved normalization mode and prediction smoothing value.
+
+Useful display controls are `--plot-gaussian-sigma`, `--gt-band-px`,
+`--contour-mode`, `--min-contour-points`, and `--border-margin`.
+Plot smoothing only affects temporary display copies; it never changes CMA
+scores, prediction arrays, or workbooks. Prediction smoothing is separately
+controlled by `--prediction-gaussian-sigma` and defaults to zero.
+
+Figures and manifests are written under:
+
+```text
+artifacts/ablation_full_physics/cycle_visualization/legacy/
+artifacts/ablation_full_physics/cycle_visualization/training-reference/
+```
