@@ -123,6 +123,45 @@ class PredictionRuntimeTests(unittest.TestCase):
         self.assertEqual(args[3], 1.0)
         np.testing.assert_array_equal(result.predictions["1M"], expected)
 
+    def test_gaussian_filter_runs_before_every_inference_step(self):
+        runtime = runtime_for("legacy", model=object())
+        start = runtime.states["init"].copy()
+
+        def fake_smooth(phi, sigma):
+            return np.asarray(phi, dtype=np.float64) + float(sigma)
+
+        def fake_predict(phi, *args, **kwargs):
+            return np.asarray(phi, dtype=np.float64) + 1.0
+
+        with mock.patch.object(
+            prediction_runtime,
+            "gaussian_smooth_interface",
+            side_effect=fake_smooth,
+        ) as smooth, mock.patch.object(
+            prediction_runtime,
+            "predict_next_levelset",
+            side_effect=fake_predict,
+        ) as predict:
+            result = run_prediction_sequence(
+                runtime,
+                start,
+                (
+                    ("deposition", 1, "1M"),
+                    ("etch", 1, "1E"),
+                ),
+                (25.0, 5.0),
+                prediction_gaussian_sigma=0.75,
+            )
+
+        self.assertEqual(smooth.call_count, 2)
+        self.assertEqual(predict.call_count, 2)
+        self.assertTrue(all(call.args[1] == 0.75 for call in smooth.call_args_list))
+        np.testing.assert_allclose(result.steps[0].model_input_phi, start + 0.75)
+        np.testing.assert_allclose(result.steps[0].prediction_phi, start + 1.75)
+        np.testing.assert_allclose(result.steps[1].input_phi, start + 1.75)
+        np.testing.assert_allclose(result.steps[1].model_input_phi, start + 2.5)
+        np.testing.assert_allclose(result.steps[1].prediction_phi, start + 3.5)
+
     def test_training_reference_mode_uses_fixed_references(self):
         captured = {}
 

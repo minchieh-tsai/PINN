@@ -55,7 +55,6 @@ def _overlays(states, mapping):
         result[prediction_state] = GroundTruthOverlay(
             phi=states[target_state],
             label=target_state,
-            band_color="#2f9e44" if target_state == "5E" else "#8a8f98",
         )
     return result
 
@@ -67,17 +66,21 @@ def _save_pair(
     m_states,
     e_states,
     overlays,
+    initial_phi,
     args,
     normalization_mode: str,
 ):
     from epi_pinn.cycle_visualization import save_cycle_figure
 
     common = {
+        "initial_phi": initial_phi,
+        "initial_label": "init",
         "plot_gaussian_sigma": args.plot_gaussian_sigma,
-        "gt_band_px": args.gt_band_px,
         "contour_mode": args.contour_mode,
         "min_contour_points": args.min_contour_points,
         "border_margin": args.border_margin,
+        "panel_width": args.panel_width,
+        "figure_height": args.figure_height,
         "dpi": args.dpi,
     }
     m_path = save_cycle_figure(
@@ -110,10 +113,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--normalization-mode", choices=("legacy", "training-reference"), default=None)
     parser.add_argument("--prediction-gaussian-sigma", type=float, default=None)
     parser.add_argument("--plot-gaussian-sigma", type=float, default=0.0)
-    parser.add_argument("--gt-band-px", type=float, default=3.0)
     parser.add_argument("--contour-mode", choices=("main", "filtered", "all"), default="main")
     parser.add_argument("--min-contour-points", type=int, default=25)
     parser.add_argument("--border-margin", type=float, default=2.0)
+    parser.add_argument("--panel-width", type=float, default=4.8)
+    parser.add_argument("--figure-height", type=float, default=8.5)
     parser.add_argument("--rollout-start", choices=("gt-2e", "predicted-2e"), default="gt-2e")
     parser.add_argument("--best-result", default=None)
     parser.add_argument("--times", nargs=8, type=float, metavar="SECONDS")
@@ -124,12 +128,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     try:
         _positive_sigma(args.prediction_gaussian_sigma, "prediction_gaussian_sigma")
         _positive_sigma(args.plot_gaussian_sigma, "plot_gaussian_sigma")
-        _positive_sigma(args.gt_band_px, "gt_band_px")
         _positive_sigma(args.border_margin, "border_margin")
     except ValueError as exc:
         parser.error(str(exc))
     if args.min_contour_points < 2 or args.dpi <= 0:
         parser.error("--min-contour-points must be >= 2 and --dpi must be positive")
+    if not math.isfinite(args.panel_width) or args.panel_width <= 0.0:
+        parser.error("--panel-width must be positive and finite")
+    if not math.isfinite(args.figure_height) or args.figure_height <= 0.0:
+        parser.error("--figure-height must be positive and finite")
     if args.times is not None and any(not math.isfinite(value) or value <= 0.0 for value in args.times):
         parser.error("all --times values must be positive and finite")
     if args.mode == "cmaes" and (bool(args.best_result) == bool(args.times)):
@@ -235,6 +242,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             M_STATES_STANDARD,
             E_STATES_STANDARD,
             overlays,
+            runtime.states["init"],
             args,
             normalization_mode,
         )
@@ -263,6 +271,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             M_STATES_CMAES,
             E_STATES_CMAES,
             overlays,
+            runtime.states["init"],
             args,
             normalization_mode,
         )
@@ -277,7 +286,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "normalization": normalization_metadata(runtime),
         "prediction_gaussian_sigma": prediction_sigma,
         "plot_gaussian_sigma": args.plot_gaussian_sigma,
-        "gt_band_px": args.gt_band_px,
+        "prediction_gaussian_filter": {
+            "called_before_each_inference": True,
+            "smoothing_active": prediction_sigma > 0.0,
+        },
+        "initial_boundary": "init",
+        "panel_width": args.panel_width,
+        "figure_height": args.figure_height,
         "contour_mode": args.contour_mode,
         "input_source": input_source,
         "figures": [str(path) for path in figure_paths],
@@ -295,6 +310,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     }
     manifest_path = destination / manifest_name
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if prediction_sigma > 0.0:
+        print(
+            f"Prediction Gaussian filter: sigma={prediction_sigma:g}, "
+            f"applied before all {len(steps)} inference steps."
+        )
+    else:
+        print(
+            "Prediction Gaussian filter: sigma=0; called before every inference "
+            "step as an identity copy (no smoothing)."
+        )
     print(f"Saved cycle figures: {figure_paths[0]}, {figure_paths[1]}")
     print(f"Saved manifest: {manifest_path}")
     return 0

@@ -19,7 +19,6 @@ sys.modules.setdefault("epi_pinn", PACKAGE)
 from epi_pinn.cycle_visualization import (
     GroundTruthOverlay,
     create_cycle_figure,
-    gt_band_mask,
     save_cycle_figure,
 )
 
@@ -44,55 +43,82 @@ def step(state, input_state, duration, input_phi, prediction_phi):
 
 
 class CycleVisualizationTests(unittest.TestCase):
-    def test_gt_band_is_inclusive_and_validated(self):
-        phi = np.array([[-3.1, -3.0, 0.0, 3.0, 3.1]])
-        np.testing.assert_array_equal(
-            gt_band_mask(phi, 3.0),
-            np.array([[False, True, True, True, False]]),
-        )
-        with self.assertRaises(ValueError):
-            gt_band_mask(phi, -1.0)
-
-    def test_figure_has_one_axis_per_state_and_does_not_mutate_arrays(self):
-        phi0 = circle_phi(center_y=20.0)
-        phi1 = circle_phi(center_y=21.0)
-        phi2 = circle_phi(center_y=22.0)
-        snapshots = [array.copy() for array in (phi0, phi1, phi2)]
+    def test_every_panel_uses_fixed_initial_boundary_without_gt_band(self):
+        initial = circle_phi(center_y=18.0)
+        step_input_1 = circle_phi(center_y=20.0)
+        step_input_2 = circle_phi(center_y=21.0)
+        prediction_1 = circle_phi(center_y=22.0)
+        prediction_2 = circle_phi(center_y=23.0)
+        arrays = (initial, step_input_1, step_input_2, prediction_1, prediction_2)
+        snapshots = [array.copy() for array in arrays]
         steps = [
-            step("1M", "init", 100.0, phi0, phi1),
-            step("2M", "predicted 1E", 120.0, phi1, phi2),
+            step("1M", "init", 100.0, step_input_1, prediction_1),
+            step("2M", "predicted 1E", 120.0, step_input_2, prediction_2),
         ]
         overlays = {
-            "1M": GroundTruthOverlay(phi1.copy(), "1M"),
-            "2M": GroundTruthOverlay(phi2.copy(), "5M"),
+            "1M": GroundTruthOverlay(prediction_1.copy(), "1M"),
+            "2M": GroundTruthOverlay(prediction_2.copy(), "5M"),
         }
 
         fig = create_cycle_figure(
             steps,
             ("1M", "2M"),
             overlays,
+            initial_phi=initial,
+            initial_label="init",
             plot_gaussian_sigma=0.75,
-            gt_band_px=3.0,
             contour_mode="all",
             min_contour_points=2,
         )
         try:
             self.assertEqual(len(fig.axes), 2)
-            self.assertIn("input: init", fig.axes[0].get_title())
+            self.assertEqual(tuple(fig.get_size_inches()), (9.6, 8.5))
+            for axis in fig.axes:
+                self.assertEqual(len(axis.images), 0)
+                self.assertGreaterEqual(len(axis.lines), 2)
+                self.assertEqual(axis.lines[0].get_color(), "#202124")
+                self.assertEqual(axis.lines[0].get_linestyle(), "-")
+                self.assertNotIn("input:", axis.get_title())
+            np.testing.assert_allclose(
+                fig.axes[0].lines[0].get_xdata(),
+                fig.axes[1].lines[0].get_xdata(),
+            )
+            np.testing.assert_allclose(
+                fig.axes[0].lines[0].get_ydata(),
+                fig.axes[1].lines[0].get_ydata(),
+            )
             self.assertIn("GT target: 5M", fig.axes[1].get_title())
         finally:
             plt.close(fig)
 
-        for actual, expected in zip((phi0, phi1, phi2), snapshots):
+        for actual, expected in zip(arrays, snapshots):
             np.testing.assert_array_equal(actual, expected)
 
+    def test_figure_size_validation(self):
+        phi = circle_phi()
+        steps = [step("1M", "init", 100.0, phi, phi)]
+        with self.assertRaises(ValueError):
+            create_cycle_figure(
+                steps,
+                ("1M",),
+                {},
+                initial_phi=phi,
+                panel_width=0.0,
+            )
+        with self.assertRaises(ValueError):
+            create_cycle_figure(
+                steps,
+                ("1M",),
+                {},
+                initial_phi=phi,
+                figure_height=float("nan"),
+            )
+
     def test_save_closes_figure_and_creates_nonempty_png(self):
-        phi0 = circle_phi(center_y=20.0)
-        phi1 = circle_phi(center_y=21.0)
-        steps = [step("1E", "predicted 1M", 10.0, phi0, phi1)]
-        overlays = {
-            "1E": GroundTruthOverlay(phi1.copy(), "5E", band_color="#2f9e44")
-        }
+        initial = circle_phi(center_y=18.0)
+        prediction = circle_phi(center_y=21.0)
+        steps = [step("1E", "predicted 1M", 10.0, prediction, prediction)]
+        overlays = {"1E": GroundTruthOverlay(prediction.copy(), "5E")}
         before = set(plt.get_fignums())
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "cycle.png"
@@ -101,6 +127,7 @@ class CycleVisualizationTests(unittest.TestCase):
                 ("1E",),
                 overlays,
                 output,
+                initial_phi=initial,
                 dpi=72,
                 contour_mode="all",
                 min_contour_points=2,

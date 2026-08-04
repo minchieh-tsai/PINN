@@ -208,11 +208,22 @@ For the second stage, point `--best-result` at the
 `training-reference/best_result.json` file. The script reads and enforces the
 saved normalization mode and prediction smoothing value.
 
-Useful display controls are `--plot-gaussian-sigma`, `--gt-band-px`,
-`--contour-mode`, `--min-contour-points`, and `--border-margin`.
-Plot smoothing only affects temporary display copies; it never changes CMA
-scores, prediction arrays, or workbooks. Prediction smoothing is separately
-controlled by `--prediction-gaussian-sigma` and defaults to zero.
+Every panel uses the workbook `init` contour as the black solid initial
+boundary. The blue solid line is the PINN prediction and the red dashed line is
+GT when a target is available. GT pixel bands are not drawn.
+
+Useful display controls are `--plot-gaussian-sigma`, `--contour-mode`,
+`--min-contour-points`, `--border-margin`, `--panel-width`, and
+`--figure-height`. The default canvas uses 4.8 inches per panel and an
+8.5-inch height to keep titles and legends separated. Plot smoothing only
+affects temporary display copies; it never changes CMA scores, prediction
+arrays, or workbooks.
+
+Before every inference step, the sequence runtime calls the Gaussian interface
+helper. `--prediction-gaussian-sigma 0` is an identity copy with no smoothing;
+use a nonzero value such as `--prediction-gaussian-sigma 0.75` to apply actual
+Gaussian smoothing before every model prediction. CMA-ES visualization uses
+the value stored in `best_result.json` unless the CLI explicitly overrides it.
 
 Figures and manifests are written under:
 
